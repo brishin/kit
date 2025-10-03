@@ -14,7 +14,7 @@ A Python-based CLI tool using Click and Questionary that provides three main sub
 
 1. **`wt create <branch-name>`** - Creates git worktrees with standardized naming conventions
    - Branch format: `{prefix}/{branch-name}` (default prefix: `bs`)
-   - Worktree location: `./.conductor/{prefix}-{branch-name}`
+   - Worktree location: `./.worktrees/{prefix}-{branch-name}`
    - Automatically changes to the new worktree directory after creation
    - Interactive prompt if branch already exists
 
@@ -96,7 +96,7 @@ This pattern allows:
 
 - Main branch: `main`
 - Feature branches: `bs/feature-name` (created via `wt create`)
-- Worktrees located in: `./.conductor/bs-feature-name`
+- Worktrees located in: `./.worktrees/bs-feature-name`
 
 ## GitHub CLI Integration
 

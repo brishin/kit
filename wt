@@ -71,14 +71,14 @@ def create(branch_name, prefix):
 
     Example: wt create resend-email
       -> Creates branch: bs/resend-email
-      -> Creates worktree at: ./.conductor/bs-resend-email
+      -> Creates worktree at: ./.worktrees/bs-resend-email
     """
     # Remove any existing prefix if user provided it
     branch_base = branch_name.replace(f"{prefix}/", "")
 
     # Construct the full branch name and directory
     full_branch = f"{prefix}/{branch_base}"
-    worktree_dir = f"./.conductor/{prefix}-{branch_base}"
+    worktree_dir = f"./.worktrees/{prefix}-{branch_base}"
 
     print(f"Branch: {full_branch}")
     print(f"Worktree directory: {worktree_dir}")
@@ -119,8 +119,8 @@ def create(branch_name, prefix):
         # Create new branch
         cmd = f"git worktree add -B {full_branch} {worktree_dir}"
 
-    # Create the .conductor directory if it doesn't exist
-    os.makedirs(".conductor", exist_ok=True)
+    # Create the .worktrees directory if it doesn't exist
+    os.makedirs(".worktrees", exist_ok=True)
 
     # Run the command
     print("\n🔨 Creating worktree...")
