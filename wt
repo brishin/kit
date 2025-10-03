@@ -104,8 +104,18 @@ def create(branch_name, prefix):
     if branch_exists:
         print(f"⚠️  Branch {full_branch} already exists")
 
+        # Check if branch is already checked out in a worktree
+        worktree_list = run_command("git worktree list --porcelain")
+        if worktree_list:
+            for line in worktree_list.split('\n'):
+                if line.startswith('branch ') and line.split(' ', 1)[1] == f"refs/heads/{full_branch}":
+                    print(f"❌ Error: Branch {full_branch} is already checked out in a worktree")
+                    print("\nExisting worktrees:")
+                    print(run_command("git worktree list"))
+                    sys.exit(1)
+
         use_existing = questionary.confirm(
-            "Do you want to use the existing branch?",
+            "Do you want to create a worktree for the existing branch?",
             default=True
         ).ask()
 
