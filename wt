@@ -78,11 +78,15 @@ def create(branch_name, prefix):
         print("❌ Error: Not in a git repository")
         sys.exit(1)
 
-    # Get the git repository root to ensure worktrees are created at the repo level
-    git_root = run_command("git rev-parse --show-toplevel")
-    if not git_root:
-        print("❌ Error: Could not determine git repository root")
+    # Get the main repository root (not the current worktree root)
+    # git rev-parse --git-common-dir gives us the main .git directory
+    git_common_dir = run_command("git rev-parse --git-common-dir")
+    if not git_common_dir:
+        print("❌ Error: Could not determine git directory")
         sys.exit(1)
+
+    # The main repo root is the parent of the .git directory
+    git_root = str(Path(git_common_dir).parent.resolve())
 
     # Remove any existing prefix if user provided it
     branch_base = branch_name.replace(f"{prefix}/", "")
