@@ -136,8 +136,8 @@ def create(branch_name, prefix):
         # Use existing branch (remove -B flag)
         cmd = f"git worktree add {worktree_dir} {full_branch}"
     else:
-        # Create new branch
-        cmd = f"git worktree add -B {full_branch} {worktree_dir}"
+        # Create new branch based on main
+        cmd = f"git worktree add -B {full_branch} {worktree_dir} main"
 
     # Create the .worktrees directory if it doesn't exist (at repo root)
     worktrees_dir = os.path.join(git_root, ".worktrees")
