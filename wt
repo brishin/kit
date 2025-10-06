@@ -73,21 +73,27 @@ def create(branch_name, prefix):
       -> Creates branch: bs/resend-email
       -> Creates worktree at: ./.worktrees/bs-resend-email
     """
-    # Remove any existing prefix if user provided it
-    branch_base = branch_name.replace(f"{prefix}/", "")
-
-    # Construct the full branch name and directory
-    full_branch = f"{prefix}/{branch_base}"
-    worktree_dir = f"./.worktrees/{prefix}-{branch_base}"
-
-    print(f"Branch: {full_branch}")
-    print(f"Worktree directory: {worktree_dir}")
-    print()
-
     # Check if we're in a git repo
     if not check_git_repo():
         print("❌ Error: Not in a git repository")
         sys.exit(1)
+
+    # Get the git repository root to ensure worktrees are created at the repo level
+    git_root = run_command("git rev-parse --show-toplevel")
+    if not git_root:
+        print("❌ Error: Could not determine git repository root")
+        sys.exit(1)
+
+    # Remove any existing prefix if user provided it
+    branch_base = branch_name.replace(f"{prefix}/", "")
+
+    # Construct the full branch name and directory (relative to git root)
+    full_branch = f"{prefix}/{branch_base}"
+    worktree_dir = os.path.join(git_root, ".worktrees", f"{prefix}-{branch_base}")
+
+    print(f"Branch: {full_branch}")
+    print(f"Worktree directory: {worktree_dir}")
+    print()
 
     # Check if worktree directory already exists
     if Path(worktree_dir).exists():
@@ -129,8 +135,9 @@ def create(branch_name, prefix):
         # Create new branch
         cmd = f"git worktree add -B {full_branch} {worktree_dir}"
 
-    # Create the .worktrees directory if it doesn't exist
-    os.makedirs(".worktrees", exist_ok=True)
+    # Create the .worktrees directory if it doesn't exist (at repo root)
+    worktrees_dir = os.path.join(git_root, ".worktrees")
+    os.makedirs(worktrees_dir, exist_ok=True)
 
     # Run the command
     print("\n🔨 Creating worktree...")
@@ -141,13 +148,13 @@ def create(branch_name, prefix):
     print("   Changing directory...")
 
     # Output cd command to fd 3 for shell to eval
-    abs_path = os.path.abspath(worktree_dir)
+    # worktree_dir is already an absolute path from os.path.join(git_root, ...)
     try:
         with open('/dev/fd/3', 'w') as fd3:
-            fd3.write(f"cd '{abs_path}'\n")
+            fd3.write(f"cd '{worktree_dir}'\n")
     except (OSError, IOError):
         # fd 3 not available, output to stderr as fallback
-        print(f"cd '{abs_path}'", file=sys.stderr)
+        print(f"cd '{worktree_dir}'", file=sys.stderr)
 
 
 @cli.command()
