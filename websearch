@@ -1,0 +1,106 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "openai>=1.0.0",
+#     "python-dotenv>=1.0.0",
+#     "click>=8.0.0",
+# ]
+# ///
+
+"""
+websearch - CLI tool for web search using OpenAI Responses API
+
+Optimized for AI coding agents with comprehensive technical guidance.
+"""
+
+import sys
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from openai import OpenAI
+import click
+
+
+# Load environment variables from ~/.env.local at module level
+env_file = Path.home() / ".env.local"
+if env_file.exists():
+    load_dotenv(env_file)
+
+
+# Optimized system prompt for AI coding agent queries
+# Based on evaluation of 42 test queries across diverse task types
+RECOMMENDED_PROMPT = """Provide comprehensive technical guidance for AI coding assistants.
+
+When multiple approaches exist, analyze pros/cons and tradeoffs explicitly. Include concrete code examples with explanations showing real-world implementation patterns. Address security considerations and performance implications relevant to the topic. Call out common pitfalls and mistakes to avoid. For technology comparisons or decisions, provide clear criteria for choosing between options.
+
+Organize your response clearly with section headers, but adapt the structure naturally to the question type. Prioritize actionable, practical information over theoretical concepts."""
+
+
+@click.command()
+@click.argument("query")
+@click.option("--system", "-s", help="Override default optimized prompt with custom system message")
+def main(query, system):
+    """Web search using OpenAI Responses API with AI coding agent optimization.
+
+    Returns comprehensive technical guidance with code examples, pros/cons,
+    security considerations, and best practices. Optimized for architecture,
+    implementation, debugging, and technology comparison queries.
+
+    \b
+    BEST QUERY TYPES:
+    • Architecture/Design: "How to structure a full-stack TypeScript app?"
+    • Implementation: "How to implement OAuth2 with Google?"
+    • Debugging: "How to debug Node.js memory leaks?"
+    • Performance: "Best practices for PostgreSQL query optimization?"
+    • Comparisons: "GraphQL vs REST for mobile backends?"
+    • Version-specific: "Tailwind v4 migration guide from v3?"
+
+    \b
+    TIPS: Be specific about tech stack, ask for pros/cons, include context.
+
+    \b
+    EXAMPLES:
+      websearch "How to structure a scalable Node.js API?"
+      websearch "Key features in Swift 6.2?"
+      websearch --system "Be concise" "What is Docker?"
+    """
+    # Check for API key
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        click.echo("Error: OPENAI_API_KEY environment variable not set", err=True)
+        click.echo("Please set it in ~/.env.local or export OPENAI_API_KEY='your-api-key'", err=True)
+        sys.exit(1)
+
+    # Use optimized prompt by default, allow override with --system
+    effective_system = system if system else RECOMMENDED_PROMPT
+
+    # Initialize OpenAI client
+    client = OpenAI(api_key=api_key)
+
+    try:
+        # Always use system prompt (either custom or default optimized)
+        input_data = [
+            {"role": "system", "content": effective_system},
+            {"role": "user", "content": query}
+        ]
+
+        # Make the API call with web search
+        response = client.responses.create(
+            model="gpt-5-mini",
+            tools=[
+                {"type": "web_search"},
+            ],
+            input=input_data,
+        )
+
+        # Print the response text
+        click.echo(response.output_text)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
