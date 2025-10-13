@@ -6,6 +6,7 @@
 #     "python-dotenv>=1.0.0",
 #     "click>=8.0.0",
 #     "google-genai>=1.0.0",
+#     "rich>=13.0.0",
 # ]
 # ///
 
@@ -24,6 +25,10 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from openai import OpenAI
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
 # Load environment variables from ~/.env.local at module level
 env_file = Path.home() / ".env.local"
@@ -140,7 +145,19 @@ def main(query, system, model):
 
             grounding_tool = types.Tool(google_search=types.GoogleSearch())
 
-            response = client.models.generate_content(
+            # Use Rich for streaming with dynamic citations
+            console = Console()
+            response_text = Text()
+            citation_panel = Panel(Text(""), title="Citations", border_style="dim")
+
+            def make_layout():
+                """Combine response text and citation panel"""
+                if citation_panel.renderable.plain:
+                    return Group(response_text, Text("\n"), citation_panel)
+                return response_text
+
+            # Stream the response
+            response_stream = client.models.generate_content_stream(
                 model=model_name,
                 contents=combined_prompt,
                 config=types.GenerateContentConfig(
@@ -149,18 +166,30 @@ def main(query, system, model):
                 ),
             )
 
-            # Try to extract citations and format text with inline markers
+            full_text = ""
+            final_response = None
+
             try:
-                text = response.text
+                with Live(make_layout(), console=console, refresh_per_second=10) as live:
+                    for chunk in response_stream:
+                        if chunk.text:
+                            response_text.append(chunk.text)
+                            full_text += chunk.text
+                            live.update(make_layout())
+                        final_response = chunk
+
+                # Extract and process citations from the final response
                 citations = []
+                text_with_citations = full_text
 
                 if (
-                    hasattr(response, "candidates")
-                    and response.candidates
-                    and hasattr(response.candidates[0], "grounding_metadata")
-                    and response.candidates[0].grounding_metadata
+                    final_response
+                    and hasattr(final_response, "candidates")
+                    and final_response.candidates
+                    and hasattr(final_response.candidates[0], "grounding_metadata")
+                    and final_response.candidates[0].grounding_metadata
                 ):
-                    metadata = response.candidates[0].grounding_metadata
+                    metadata = final_response.candidates[0].grounding_metadata
 
                     # Extract all sources from grounding chunks
                     sources = []
@@ -213,21 +242,32 @@ def main(query, system, model):
                                 marker = f"[{','.join(unique_nums)}]"
                                 # Use character indices (works for ASCII/UTF-8)
                                 end_idx = segment.end_index
-                                text = text[:end_idx] + marker + text[end_idx:]
+                                text_with_citations = text_with_citations[:end_idx] + marker + text_with_citations[end_idx:]
 
-                # Display formatted text
-                click.echo(text)
-
-                # Display citation list
+                # Display final output with citations
                 if citations:
-                    click.echo("\n\n--- Citations ---")
+                    # Build citation list
+                    citation_lines = []
                     for i, citation in enumerate(citations, 1):
-                        click.echo(f"[{i}] {citation['title']}")
-                        click.echo(f"    {citation['uri']}")
+                        citation_lines.append(f"[{i}] {citation['title']}")
+                        citation_lines.append(f"    {citation['uri']}")
 
-            except Exception:
-                # If anything fails, just display the plain text
-                click.echo(response.text)
+                    # Update and display final result
+                    response_text = Text(text_with_citations)
+                    citation_panel = Panel(
+                        Text("\n".join(citation_lines)),
+                        title="[bold blue]Citations[/bold blue]",
+                        border_style="blue"
+                    )
+
+                    console.print(Group(response_text, Text("\n"), citation_panel))
+                else:
+                    # No citations, just print the text
+                    console.print(response_text)
+
+            except Exception as e:
+                # If streaming fails, display error
+                click.echo(f"\nError during streaming: {e}", err=True)
 
         else:
             click.echo(
