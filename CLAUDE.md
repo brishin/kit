@@ -1,4 +1,4 @@
-# brian-scripts
+# kit
 
 Personal utility scripts for git worktree management and workflow automation.
 
@@ -38,7 +38,7 @@ Add this function to `~/.zshrc` or `~/.bashrc`:
 ```bash
 # Git worktree unified CLI
 wt() {
-  eval "$(~/Programming/brian-scripts/wt "$@" 3>&1 1>&2)"
+  eval "$(~/Programming/kit/wt "$@" 3>&1 1>&2)"
 }
 ```
 

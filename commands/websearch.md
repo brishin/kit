@@ -1,12 +1,12 @@
 ---
-allowed-tools: Bash(~/Programming/brian-scripts/websearch:*)
+allowed-tools: Bash(~/Programming/kit/websearch:*)
 description: Technical web search - use DETAILED questions with tech stack context (e.g., "How to implement OAuth2 in Node.js?" not "OAuth2"). Best for architecture, implementation, debugging, comparisons, best practices
 argument-hint: [--model gpt|gemini] [--system "custom prompt"] "query"
 ---
 
 Query arguments: $ARGUMENTS
 
-Use the Bash tool to call: `~/Programming/brian-scripts/websearch` with the query arguments shown above.
+Use the Bash tool to call: `~/Programming/kit/websearch` with the query arguments shown above.
 
 The websearch CLI supports the following options:
 - `-m, --model`: Choose 'gpt' (gpt-5-mini) or 'gemini' (gemini-2.5-flash)
