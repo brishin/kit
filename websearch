@@ -149,7 +149,85 @@ def main(query, system, model):
                 ),
             )
 
-            click.echo(response.text)
+            # Try to extract citations and format text with inline markers
+            try:
+                text = response.text
+                citations = []
+
+                if (
+                    hasattr(response, "candidates")
+                    and response.candidates
+                    and hasattr(response.candidates[0], "grounding_metadata")
+                    and response.candidates[0].grounding_metadata
+                ):
+                    metadata = response.candidates[0].grounding_metadata
+
+                    # Extract all sources from grounding chunks
+                    sources = []
+                    if (
+                        hasattr(metadata, "grounding_chunks")
+                        and metadata.grounding_chunks
+                    ):
+                        for chunk in metadata.grounding_chunks:
+                            if hasattr(chunk, "web") and chunk.web:
+                                uri = getattr(chunk.web, "uri", None)
+                                title = getattr(chunk.web, "title", None)
+                                if uri:
+                                    sources.append(
+                                        {"uri": uri, "title": title or "Untitled"}
+                                    )
+
+                    # Process grounding supports to insert inline citations
+                    if sources and hasattr(metadata, "grounding_supports") and metadata.grounding_supports:
+                        # Sort by end_index descending to avoid offset issues
+                        supports = sorted(
+                            metadata.grounding_supports,
+                            key=lambda s: s.segment.end_index if s.segment.end_index is not None else 0,
+                            reverse=True,
+                        )
+
+                        uri_to_citation_num = {}  # Map URI to citation number (for deduplication)
+
+                        for support in supports:
+                            segment = support.segment
+                            chunk_indices = support.grounding_chunk_indices
+
+                            # Get citation numbers for this segment
+                            citation_numbers = []
+                            for chunk_index in chunk_indices:
+                                if chunk_index < len(sources):
+                                    source = sources[chunk_index]
+                                    uri = source["uri"]
+
+                                    # Deduplicate by URI
+                                    if uri not in uri_to_citation_num:
+                                        uri_to_citation_num[uri] = len(citations) + 1
+                                        citations.append(source)
+
+                                    citation_numbers.append(str(uri_to_citation_num[uri]))
+
+                            # Insert citation marker at end of segment
+                            if citation_numbers and segment.end_index is not None:
+                                # Remove duplicates and sort
+                                unique_nums = sorted(set(citation_numbers), key=int)
+                                marker = f"[{','.join(unique_nums)}]"
+                                # Use character indices (works for ASCII/UTF-8)
+                                end_idx = segment.end_index
+                                text = text[:end_idx] + marker + text[end_idx:]
+
+                # Display formatted text
+                click.echo(text)
+
+                # Display citation list
+                if citations:
+                    click.echo("\n\n--- Citations ---")
+                    for i, citation in enumerate(citations, 1):
+                        click.echo(f"[{i}] {citation['title']}")
+                        click.echo(f"    {citation['uri']}")
+
+            except Exception:
+                # If anything fails, just display the plain text
+                click.echo(response.text)
 
         else:
             click.echo(
