@@ -1,0 +1,14 @@
+{
+  "name": "brian-scripts",
+  "version": "1.0.0",
+  "description": "Personal utility scripts for git worktree management and web search",
+  "author": {
+    "name": "brian"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "web-search",
+    "utilities"
+  ]
+}

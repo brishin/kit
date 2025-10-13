@@ -1,0 +1,21 @@
+{
+  "$schema": "https://marketplace.claude.com/plugin-manifest-schema.json",
+  "name": "brian-scripts-marketplace",
+  "version": "1.0.0",
+  "description": "Personal utility scripts for git worktree management and web search",
+  "owner": {
+    "name": "brian",
+    "email": "brian@brishin.com"
+  },
+  "plugins": [
+    {
+      "name": "brian-scripts",
+      "source": "./",
+      "description": "Personal utility scripts including AI-powered web search for technical queries",
+      "version": "1.0.0",
+      "author": {
+        "name": "brian"
+      }
+    }
+  ]
+}
