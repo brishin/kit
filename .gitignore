@@ -1,0 +1,6 @@
+__pycache__/
+.env.local
+.venv/
+.mypy_cache/
+.DS_Store
+.claude/*.local.json
