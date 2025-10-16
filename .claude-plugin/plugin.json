@@ -5,10 +5,6 @@
   "author": {
     "name": "brian"
   },
-  "keywords": [
-    "git",
-    "worktree",
-    "web-search",
-    "utilities"
-  ]
+  "license": "MIT",
+  "homepage": "https://github.com/briansunter/kit"
 }

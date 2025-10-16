@@ -4,7 +4,44 @@ Personal utility scripts for git worktree management and workflow automation.
 
 ## Project Overview
 
-This repository contains command-line utilities that enhance git worktree workflows, primarily focused on the unified `wt` CLI tool.
+This repository contains command-line utilities that enhance git worktree workflows, primarily focused on the unified `wt` CLI tool, as well as a Claude Code plugin that provides web research capabilities.
+
+## Claude Code Plugin
+
+This repository is also available as a Claude Code plugin that provides specialized web research capabilities through the `web-researcher` agent.
+
+### Installation
+
+Add this repository as a Claude Code marketplace:
+
+```bash
+/plugin marketplace add yourusername/kit
+/plugin install kit
+```
+
+Or install directly from a local clone:
+
+```bash
+/plugin install /path/to/kit
+```
+
+### Features
+
+**Web Research Agent**: Specialized agent for gathering technical information from the web. Automatically invoked when Claude Code needs:
+- Current documentation and API references
+- Best practices and implementation patterns
+- Technology comparisons and architecture decisions
+- Debugging strategies and performance optimization
+- Version-specific features and migration guides
+
+**Slash Command**: Use `/kit:websearch` to perform direct web searches:
+```bash
+/kit:websearch "How to implement OAuth2 in Node.js Express apps?"
+```
+
+The websearch tool supports:
+- `--model gpt|gemini` - Choose between GPT-4o-mini or Gemini-2.0-Flash (default: gpt)
+- `--system "prompt"` - Override the default optimized system prompt
 
 ## Main Tool: `wt`
 
