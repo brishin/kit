@@ -319,8 +319,12 @@ gt c -am "Logical unit 2"
 # Check stack structure
 gt ls
 
-# Submit when ready
+# Submit when ready (as drafts)
 gt ss
+
+# Update titles/bodies and mark PRs as ready
+gh pr edit <pr-number> --title "Title" --body "Description"
+gh pr ready <pr-number>
 ```
 
 ### After Review Feedback
@@ -337,6 +341,10 @@ gt m -cam "Address review feedback"
 
 # Update PRs
 gt ss -u
+
+# Update titles/bodies and mark as ready if needed
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ### After Merging PRs
@@ -368,14 +376,22 @@ gt get their-branch
 gt co specific-branch    # Navigate to branch you want to modify
 # ... make changes ...
 gt m -a
-gt submit                # Push your changes
+gt submit                # Push your changes (as draft)
+
+# Update title/body and mark as ready
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ### Handing Off a Stack
 
 ```bash
-# Make sure everything is pushed
+# Make sure everything is pushed (as drafts)
 gt ss
+
+# Update titles/bodies and mark PRs as ready
+gh pr edit <pr-number> --title "Title" --body "Description"
+gh pr ready <pr-number>
 
 # Tell teammate:
 # "Run: gt get <top-branch-name>"
@@ -441,6 +457,10 @@ gt continue -a
 
 # Update PRs
 gt ss -u
+
+# Update titles/bodies and mark as ready if needed
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ## Common Mistakes & Solutions
@@ -565,8 +585,12 @@ Before submitting a stack, verify:
 ### Graphite + Code Review Tools
 
 - Set reviewers at submit time: `gt submit -r alice,bob`
-- Use draft PRs for WIP: `gt submit -d`
-- Publish when ready: `gt submit -p`
+- PRs are created as drafts by default with `gt submit`
+- Update PR details and mark as ready using GitHub CLI:
+  ```bash
+  gh pr edit <pr-number> --title "Title" --body "Description"
+  gh pr ready <pr-number>
+  ```
 
 ### Graphite + CI/CD
 

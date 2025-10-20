@@ -69,8 +69,12 @@ gt c -am "Add password reset"
 # View your stack
 gt ls
 
-# Submit all PRs
+# Submit all PRs (creates as drafts, outputs PR numbers)
 gt ss
+
+# Update PR title/body, then mark as ready using the PR numbers from gt ss output
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ## Addressing Review Feedback
@@ -83,8 +87,12 @@ gt co   # interactive selection, or gt d/u to navigate
 gt m -a
 
 # Dependent branches auto-restack
-# Resubmit the stack
+# Resubmit the stack (updates existing PRs)
 gt ss -u
+
+# Update PR title/body and mark as ready if needed
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ## Daily Sync & Cleanup
@@ -155,8 +163,12 @@ gt c -am "Add user CRUD endpoints"
 # 4. Create frontend layer (depends on #3)
 gt c -am "Add user management UI"
 
-# 5. Submit all 3 PRs
+# 5. Submit all 3 PRs (as drafts)
 gt ss
+
+# 6. Update titles/bodies and mark as ready for each PR
+gh pr edit <pr-number> --title "Title" --body "Description"
+gh pr ready <pr-number>
 ```
 
 ## Pattern: Insert Changes Mid-Stack
@@ -168,6 +180,10 @@ gt d 2              # go down to branch-1
 gt m -a             # amend branch-1
 # branch-2 and branch-3 auto-restack
 gt ss -u            # update all PRs
+
+# Update titles/bodies and mark as ready if needed
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 ## Pattern: Split Work Retrospectively
@@ -190,8 +206,12 @@ gt co <specific-branch>
 # ... edit files ...
 gt m -a
 
-# Push updates
+# Push updates (as draft)
 gt submit
+
+# Update title/body and mark as ready
+gh pr edit <pr-number> --title "Updated title" --body "Updated description"
+gh pr ready <pr-number>
 ```
 
 # When to Use Graphite vs Git
