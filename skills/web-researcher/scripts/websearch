@@ -1,0 +1,284 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "openai>=1.0.0",
+#     "python-dotenv>=1.0.0",
+#     "click>=8.0.0",
+#     "google-genai>=1.0.0",
+#     "rich>=13.0.0",
+# ]
+# ///
+
+"""
+websearch - CLI tool for web search using OpenAI Responses API or Google Gemini
+
+Optimized for AI coding agents with comprehensive technical guidance.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+import click
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from openai import OpenAI
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
+
+# Load environment variables from ~/.env.local at module level
+env_file = Path.home() / ".env.local"
+if env_file.exists():
+    load_dotenv(env_file)
+
+
+# Model aliases for convenience
+MODEL_ALIASES = {
+    "gpt": "gpt-5-mini",
+    "gemini": "gemini-2.5-flash-preview-09-2025",
+}
+
+# Optimized system prompt for AI coding agent queries
+# Based on evaluation of 42 test queries across diverse task types
+RECOMMENDED_PROMPT = """Provide comprehensive technical guidance for AI coding assistants.
+
+When multiple approaches exist, analyze pros/cons and tradeoffs explicitly. Include concrete code examples with explanations showing real-world implementation patterns. Address security considerations and performance implications relevant to the topic. Call out common pitfalls and mistakes to avoid. For technology comparisons or decisions, provide clear criteria for choosing between options.
+
+Organize your response clearly with section headers, but adapt the structure naturally to the question type. Prioritize actionable, practical information over theoretical concepts."""
+
+
+@click.command()
+@click.argument("query")
+@click.option(
+    "--system",
+    "-s",
+    help="Override default optimized prompt with custom system message",
+)
+@click.option(
+    "--model",
+    "-m",
+    default="gemini",
+    help="Model to use: 'gpt' (gpt-5-mini) or 'gemini' (gemini-2.5-flash)",
+)
+def main(query, system, model):
+    """Web search using OpenAI Responses API or Google Gemini with AI coding agent optimization.
+
+    Returns comprehensive technical guidance with code examples, pros/cons,
+    security considerations, and best practices. Optimized for architecture,
+    implementation, debugging, and technology comparison queries.
+
+    \b
+    BEST QUERY TYPES:
+    • Architecture/Design: "How to structure a full-stack TypeScript app?"
+    • Implementation: "How to implement OAuth2 with Google?"
+    • Debugging: "How to debug Node.js memory leaks?"
+    • Performance: "Best practices for PostgreSQL query optimization?"
+    • Comparisons: "GraphQL vs REST for mobile backends?"
+    • Version-specific: "Tailwind v4 migration guide from v3?"
+
+    \b
+    TIPS: Be specific about tech stack, ask for pros/cons, include context.
+
+    \b
+    EXAMPLES:
+      websearch "How to structure a scalable Node.js API?"
+      websearch --model gemini "Key features in Swift 6.2?"
+      websearch -m gpt --system "Be concise" "What is Docker?"
+    """
+    # Resolve model alias
+    model_name = MODEL_ALIASES.get(model, model)
+
+    # Use optimized prompt by default, allow override with --system
+    effective_system = system if system else RECOMMENDED_PROMPT
+
+    try:
+        if model in ["gpt", "gpt-5-mini"]:
+            # OpenAI Responses API with web search
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                click.echo(
+                    "Error: OPENAI_API_KEY environment variable not set", err=True
+                )
+                click.echo(
+                    "Please set it in ~/.env.local or export OPENAI_API_KEY='your-api-key'",
+                    err=True,
+                )
+                sys.exit(1)
+
+            client = OpenAI(api_key=api_key)
+
+            input_data = [
+                {"role": "system", "content": effective_system},
+                {"role": "user", "content": query},
+            ]
+
+            response = client.responses.create(
+                model=model_name,
+                tools=[{"type": "web_search"}],
+                input=input_data,
+            )
+
+            click.echo(response.output_text)
+
+        elif model in ["gemini", "gemini-2.5-flash"]:
+            # Google Gemini with Google Search grounding
+            # Check for API key
+            api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get(
+                "GOOGLE_API_KEY"
+            )
+            if not api_key:
+                click.echo(
+                    "Error: GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set",
+                    err=True,
+                )
+                click.echo("Please set it in ~/.env.local", err=True)
+                sys.exit(1)
+
+            client = genai.Client(api_key=api_key)
+
+            # Combine system and user prompt for Gemini
+            combined_prompt = f"{effective_system}\n\n{query}"
+
+            grounding_tool = types.Tool(google_search=types.GoogleSearch())
+
+            # Use Rich for streaming with dynamic citations
+            console = Console()
+            response_text = Text()
+            citation_panel = Panel(Text(""), title="Citations", border_style="dim")
+
+            def make_layout():
+                """Combine response text and citation panel"""
+                if citation_panel.renderable.plain:
+                    return Group(response_text, Text("\n"), citation_panel)
+                return response_text
+
+            # Stream the response
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=combined_prompt,
+                config=types.GenerateContentConfig(
+                    tools=[grounding_tool],
+                    temperature=0.0,
+                ),
+            )
+
+            full_text = ""
+            final_response = None
+
+            try:
+                with Live(make_layout(), console=console, refresh_per_second=10) as live:
+                    for chunk in response_stream:
+                        if chunk.text:
+                            response_text.append(chunk.text)
+                            full_text += chunk.text
+                            live.update(make_layout())
+                        final_response = chunk
+
+                # Extract and process citations from the final response
+                citations = []
+                text_with_citations = full_text
+
+                if (
+                    final_response
+                    and hasattr(final_response, "candidates")
+                    and final_response.candidates
+                    and hasattr(final_response.candidates[0], "grounding_metadata")
+                    and final_response.candidates[0].grounding_metadata
+                ):
+                    metadata = final_response.candidates[0].grounding_metadata
+
+                    # Extract all sources from grounding chunks
+                    sources = []
+                    if (
+                        hasattr(metadata, "grounding_chunks")
+                        and metadata.grounding_chunks
+                    ):
+                        for chunk in metadata.grounding_chunks:
+                            if hasattr(chunk, "web") and chunk.web:
+                                uri = getattr(chunk.web, "uri", None)
+                                title = getattr(chunk.web, "title", None)
+                                if uri:
+                                    sources.append(
+                                        {"uri": uri, "title": title or "Untitled"}
+                                    )
+
+                    # Process grounding supports to insert inline citations
+                    if sources and hasattr(metadata, "grounding_supports") and metadata.grounding_supports:
+                        # Sort by end_index descending to avoid offset issues
+                        supports = sorted(
+                            metadata.grounding_supports,
+                            key=lambda s: s.segment.end_index if s.segment.end_index is not None else 0,
+                            reverse=True,
+                        )
+
+                        uri_to_citation_num = {}  # Map URI to citation number (for deduplication)
+
+                        for support in supports:
+                            segment = support.segment
+                            chunk_indices = support.grounding_chunk_indices
+
+                            # Get citation numbers for this segment
+                            citation_numbers = []
+                            for chunk_index in chunk_indices:
+                                if chunk_index < len(sources):
+                                    source = sources[chunk_index]
+                                    uri = source["uri"]
+
+                                    # Deduplicate by URI
+                                    if uri not in uri_to_citation_num:
+                                        uri_to_citation_num[uri] = len(citations) + 1
+                                        citations.append(source)
+
+                                    citation_numbers.append(str(uri_to_citation_num[uri]))
+
+                            # Insert citation marker at end of segment
+                            if citation_numbers and segment.end_index is not None:
+                                # Remove duplicates and sort
+                                unique_nums = sorted(set(citation_numbers), key=int)
+                                marker = f"[{','.join(unique_nums)}]"
+                                # Use character indices (works for ASCII/UTF-8)
+                                end_idx = segment.end_index
+                                text_with_citations = text_with_citations[:end_idx] + marker + text_with_citations[end_idx:]
+
+                # Display final output with citations
+                if citations:
+                    # Build citation list
+                    citation_lines = []
+                    for i, citation in enumerate(citations, 1):
+                        citation_lines.append(f"[{i}] {citation['title']}")
+                        citation_lines.append(f"    {citation['uri']}")
+
+                    # Update and display final result
+                    response_text = Text(text_with_citations)
+                    citation_panel = Panel(
+                        Text("\n".join(citation_lines)),
+                        title="[bold blue]Citations[/bold blue]",
+                        border_style="blue"
+                    )
+
+                    console.print(Group(response_text, Text("\n"), citation_panel))
+                else:
+                    # No citations, just print the text
+                    console.print(response_text)
+
+            except Exception as e:
+                # If streaming fails, display error
+                click.echo(f"\nError during streaming: {e}", err=True)
+
+        else:
+            click.echo(
+                f"Error: Unknown model '{model}'. Use 'gpt' or 'gemini'.", err=True
+            )
+            sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

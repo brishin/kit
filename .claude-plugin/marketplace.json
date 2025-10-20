@@ -11,11 +11,12 @@
     {
       "name": "kit",
       "source": "./",
-      "description": "Personal utility scripts including AI-powered web search for technical queries",
+      "description": "Web research skill for gathering technical information, best practices, and current documentation from the web, plus git worktree management utilities",
       "version": "1.0.0",
       "author": {
         "name": "brian"
-      }
+      },
+      "tags": ["research", "web-search", "technical-docs", "skill", "git", "worktree"]
     }
   ]
 }

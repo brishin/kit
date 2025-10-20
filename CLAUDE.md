@@ -8,39 +8,23 @@ This repository contains command-line utilities that enhance git worktree workfl
 
 ## Claude Code Plugin
 
-This repository is also available as a Claude Code plugin that provides specialized web research capabilities through the `web-researcher` agent.
+This repository is also available as a Claude Code plugin that provides specialized web research capabilities through the `web-researcher` skill.
 
 ### Installation
 
-Add this repository as a Claude Code marketplace:
-
-```bash
-/plugin marketplace add yourusername/kit
-/plugin install kit
-```
-
-Or install directly from a local clone:
-
-```bash
-/plugin install /path/to/kit
-```
+Add this repository as a Claude Code marketplace via `/plugin`.
 
 ### Features
 
-**Web Research Agent**: Specialized agent for gathering technical information from the web. Automatically invoked when Claude Code needs:
+**Web Research Skill**: Specialized skill for gathering technical information from the web. Automatically invoked by Claude Code when the task description matches the skill's purpose, such as when needing:
 - Current documentation and API references
 - Best practices and implementation patterns
 - Technology comparisons and architecture decisions
 - Debugging strategies and performance optimization
 - Version-specific features and migration guides
 
-**Slash Command**: Use `/kit:websearch` to perform direct web searches:
-```bash
-/kit:websearch "How to implement OAuth2 in Node.js Express apps?"
-```
-
-The websearch tool supports:
-- `--model gpt|gemini` - Choose between GPT-4o-mini or Gemini-2.0-Flash (default: gpt)
+The websearch tool (located at `skills/web-researcher/scripts/websearch`) supports:
+- `--model gpt|gemini` - Choose between GPT-4o-mini or Gemini-2.0-Flash (default: gemini)
 - `--system "prompt"` - Override the default optimized system prompt
 
 ## Main Tool: `wt`

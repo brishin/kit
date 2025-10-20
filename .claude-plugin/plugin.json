@@ -1,10 +1,11 @@
 {
   "name": "kit",
   "version": "1.0.0",
-  "description": "Personal utility scripts for git worktree management and web search",
+  "description": "Web research skill for gathering technical information from the web, plus git worktree management utilities",
   "author": {
     "name": "brian"
   },
   "license": "MIT",
-  "homepage": "https://github.com/briansunter/kit"
+  "homepage": "https://github.com/briansunter/kit",
+  "keywords": ["web-search", "research", "technical", "skill", "git", "worktree"]
 }
