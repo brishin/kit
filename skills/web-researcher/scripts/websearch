@@ -16,8 +16,10 @@ websearch - CLI tool for web search using OpenAI Responses API or Google Gemini
 Optimized for AI coding agents with comprehensive technical guidance.
 """
 
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -43,12 +45,9 @@ MODEL_ALIASES = {
 }
 
 # Optimized system prompt for AI coding agent queries
-# Based on evaluation of 42 test queries across diverse task types
-RECOMMENDED_PROMPT = """Provide comprehensive technical guidance for AI coding assistants.
-
-When multiple approaches exist, analyze pros/cons and tradeoffs explicitly. Include concrete code examples with explanations showing real-world implementation patterns. Address security considerations and performance implications relevant to the topic. Call out common pitfalls and mistakes to avoid. For technology comparisons or decisions, provide clear criteria for choosing between options.
-
-Organize your response clearly with section headers, but adapt the structure naturally to the question type. Prioritize actionable, practical information over theoretical concepts."""
+# Concise variant (2025-10-20): 33% faster than previous comprehensive prompt
+# Based on evaluation of 72 test queries (18 queries × 4 prompt variants)
+RECOMMENDED_PROMPT = """Provide practical technical guidance for AI coding assistants. When multiple approaches exist, explain key tradeoffs. Include concrete code examples. Prioritize actionable information."""
 
 
 @click.command()
@@ -64,7 +63,13 @@ Organize your response clearly with section headers, but adapt the structure nat
     default="gemini",
     help="Model to use: 'gpt' (gpt-5-mini) or 'gemini' (gemini-2.5-flash)",
 )
-def main(query, system, model):
+@click.option(
+    "--benchmark",
+    "-b",
+    is_flag=True,
+    help="Output benchmark metrics (timing, tokens) as JSON to stderr",
+)
+def main(query, system, model, benchmark):
     """Web search using OpenAI Responses API or Google Gemini with AI coding agent optimization.
 
     Returns comprehensive technical guidance with code examples, pros/cons,
@@ -95,6 +100,20 @@ def main(query, system, model):
     # Use optimized prompt by default, allow override with --system
     effective_system = system if system else RECOMMENDED_PROMPT
 
+    # Benchmark tracking
+    benchmark_data = {
+        "total_time": 0,
+        "ttft": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "char_length": 0,
+        "model": model_name,
+        "query": query,
+        "system_prompt_length": len(effective_system),
+    }
+    start_time = time.time()
+    first_token_time = None
+
     try:
         if model in ["gpt", "gpt-5-mini"]:
             # OpenAI Responses API with web search
@@ -122,7 +141,21 @@ def main(query, system, model):
                 input=input_data,
             )
 
-            click.echo(response.output_text)
+            # Track TTFT (approximate - not streamed for GPT)
+            if first_token_time is None:
+                first_token_time = time.time()
+                benchmark_data["ttft"] = first_token_time - start_time
+
+            output_text = response.output_text
+            benchmark_data["char_length"] = len(output_text)
+
+            # Try to extract token counts if available
+            if hasattr(response, "usage"):
+                usage = response.usage
+                benchmark_data["input_tokens"] = getattr(usage, "input_tokens", 0)
+                benchmark_data["output_tokens"] = getattr(usage, "output_tokens", 0)
+
+            click.echo(output_text)
 
         elif model in ["gemini", "gemini-2.5-flash"]:
             # Google Gemini with Google Search grounding
@@ -173,10 +206,27 @@ def main(query, system, model):
                 with Live(make_layout(), console=console, refresh_per_second=10) as live:
                     for chunk in response_stream:
                         if chunk.text:
+                            # Track time to first token
+                            if first_token_time is None:
+                                first_token_time = time.time()
+                                benchmark_data["ttft"] = first_token_time - start_time
+
                             response_text.append(chunk.text)
                             full_text += chunk.text
                             live.update(make_layout())
                         final_response = chunk
+
+                # Extract token counts from usage metadata
+                if (
+                    final_response
+                    and hasattr(final_response, "usage_metadata")
+                    and final_response.usage_metadata
+                ):
+                    metadata = final_response.usage_metadata
+                    benchmark_data["input_tokens"] = getattr(metadata, "prompt_token_count", 0)
+                    benchmark_data["output_tokens"] = getattr(metadata, "candidates_token_count", 0)
+
+                benchmark_data["char_length"] = len(full_text)
 
                 # Extract and process citations from the final response
                 citations = []
@@ -278,6 +328,11 @@ def main(query, system, model):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    finally:
+        # Output benchmark data if requested
+        if benchmark:
+            benchmark_data["total_time"] = time.time() - start_time
+            click.echo(json.dumps(benchmark_data), err=True)
 
 
 if __name__ == "__main__":
