@@ -52,6 +52,7 @@ A command-line interface for Linear project management, powered by the Linear MC
 ### Features
 
 - **Issue Management**: List, view, create, and update Linear issues
+- **Human-Readable IDs**: Use issue identifiers (e.g., FLA-991) instead of UUIDs
 - **Comment Management**: View and add comments to issues
 - **OAuth 2.1 Authentication**: Automatic browser-based auth flow
 - **Interactive Prompts**: User-friendly questionary prompts
@@ -67,11 +68,11 @@ chmod +x linear
 linear issue list
 # Authenticate with Linear, tokens cached automatically
 
-# Common commands
-linear issue view LIN-123
+# Common commands (uses human-readable IDs like FLA-991)
+linear issue view FLA-991
 linear issue create --title "Fix bug"
-linear issue update LIN-123 --status "In Progress"
-linear comment create LIN-123 -m "Working on this"
+linear issue update FLA-991 --state "In Progress"
+linear comment create FLA-991 -m "Working on this"
 ```
 
 See [LINEAR_CLI.md](LINEAR_CLI.md) for complete documentation.
@@ -124,6 +125,20 @@ This pattern allows:
 - `git-root` - Legacy bash script (deprecated, superseded by `wt root`)
 
 ## Development Guidelines
+
+### Type Checking
+
+Run type checks on Python scripts using mypy:
+
+```bash
+uv run mypy linear
+```
+
+The project uses a `pyproject.toml` for dependency management. Install dependencies with:
+
+```bash
+uv sync --all-extras
+```
 
 ### When modifying the `wt` tool:
 

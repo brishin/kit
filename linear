@@ -30,10 +30,10 @@ import os
 import json
 from typing import Optional
 
-import click
-import questionary
-from mcp2py import load
-from mcp2py.exceptions import (
+import click  # type: ignore
+import questionary  # type: ignore
+from mcp2py import load  # type: ignore
+from mcp2py.exceptions import (  # type: ignore
     MCPError,
     MCPConnectionError,
     MCPToolError,
@@ -69,6 +69,52 @@ def get_server():
         sys.exit(1)
 
 
+def resolve_issue_id(server, identifier_or_id: str) -> str:
+    """
+    Resolve a human-readable identifier (e.g., 'LIN-123') to a UUID.
+    If already a UUID, returns it as-is.
+    """
+    # Check if it's already a UUID (contains only hex chars and dashes)
+    if all(c in '0123456789abcdef-' for c in identifier_or_id.lower()):
+        return identifier_or_id
+
+    # It's a human-readable identifier, search for it
+    try:
+        # Search for the exact identifier
+        result = server.list_issues(query=identifier_or_id, limit=50)
+
+        # Parse result
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
+
+        issues: list = []
+        if isinstance(result, dict):
+            issues_data = result.get("issues", result.get("data", []))
+            if isinstance(issues_data, list):
+                issues = issues_data
+        elif isinstance(result, list):
+            issues = result
+        else:
+            raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
+
+        # Find exact match by identifier
+        if issues:
+            for issue in issues:
+                if isinstance(issue, dict):
+                    issue_identifier = issue.get("identifier", "")
+                    issue_id = issue.get("id")
+                    if issue_identifier.upper() == identifier_or_id.upper() and issue_id:
+                        return str(issue_id)
+
+        raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
+
+    except Exception as e:
+        raise ValueError(f"Error resolving issue identifier '{identifier_or_id}': {e}")
+
+
 def format_issue(issue_data: dict, detailed: bool = False) -> str:
     """Format issue data for display."""
     if isinstance(issue_data, str):
@@ -81,8 +127,8 @@ def format_issue(issue_data: dict, detailed: bool = False) -> str:
     if not isinstance(issue_data, dict):
         return str(issue_data)
 
-    # Extract common fields
-    issue_id = issue_data.get("id", issue_data.get("identifier", "unknown"))
+    # Extract common fields - prioritize human-readable identifier
+    issue_id = issue_data.get("identifier", issue_data.get("id", "unknown"))
     title = issue_data.get("title", "No title")
     state = issue_data.get("state", issue_data.get("status", "unknown"))
 
@@ -250,7 +296,9 @@ def issue_view(issue_id: str):
     server = get_server()
 
     try:
-        result = server.get_issue(id=issue_id)
+        # Resolve human-readable identifier to UUID if needed
+        resolved_id = resolve_issue_id(server, issue_id)
+        result = server.get_issue(id=resolved_id)
 
         # Parse if string
         if isinstance(result, str):
@@ -263,10 +311,15 @@ def issue_view(issue_id: str):
         # Extract issue data
         if isinstance(result, dict):
             issue = result.get("issue", result.get("data", result))
+            if not isinstance(issue, dict):
+                issue = result
         else:
-            issue = result
+            issue = result if isinstance(result, dict) else {}
 
-        click.echo(format_issue(issue, detailed=True))
+        if isinstance(issue, dict):
+            click.echo(format_issue(issue, detailed=True))
+        else:
+            click.echo(str(issue))
 
     except MCPToolError as e:
         click.echo(f"Error: Issue not found or access denied: {e}", err=True)
@@ -357,9 +410,12 @@ def issue_create(
 
         if isinstance(result, dict):
             issue = result.get("issue", result.get("data", result))
-            issue_id = issue.get("id", issue.get("identifier", "unknown"))
-            click.echo(f"\nIssue created successfully: {issue_id}")
-            click.echo(format_issue(issue, detailed=True))
+            if isinstance(issue, dict):
+                issue_id = issue.get("id", issue.get("identifier", "unknown"))
+                click.echo(f"\nIssue created successfully: {issue_id}")
+                click.echo(format_issue(issue, detailed=True))
+            else:
+                click.echo(f"Issue created: {result}")
         else:
             click.echo(f"Issue created: {result}")
 
@@ -406,8 +462,11 @@ def issue_update(
         sys.exit(1)
 
     try:
+        # Resolve human-readable identifier to UUID if needed
+        resolved_id = resolve_issue_id(server, issue_id)
+
         # Build update parameters matching MCP server signature
-        params = {"id": issue_id}
+        params: dict = {"id": resolved_id}
         if title:
             params["title"] = title
         if description:
@@ -442,7 +501,10 @@ def issue_update(
         if isinstance(result, dict):
             issue = result.get("issue", result.get("data", result))
             click.echo(f"\nIssue {issue_id} updated successfully")
-            click.echo(format_issue(issue, detailed=True))
+            if isinstance(issue, dict):
+                click.echo(format_issue(issue, detailed=True))
+            else:
+                click.echo(str(result))
         else:
             click.echo(f"Issue updated: {result}")
 
@@ -461,8 +523,11 @@ def comment_list(issue_id: str):
     server = get_server()
 
     try:
+        # Resolve human-readable identifier to UUID if needed
+        resolved_id = resolve_issue_id(server, issue_id)
+
         # Match MCP server signature: list_comments(issueId: str)
-        result = server.list_comments(issueId=issue_id)
+        result = server.list_comments(issueId=resolved_id)
 
         # Parse result
         if isinstance(result, str):
@@ -516,8 +581,11 @@ def comment_create(issue_id: str, message: Optional[str], parent_id: Optional[st
             sys.exit(1)
 
     try:
+        # Resolve human-readable identifier to UUID if needed
+        resolved_id = resolve_issue_id(server, issue_id)
+
         # Match MCP server signature: create_comment(issueId: str, parentId: str | None, body: str)
-        params = {"issueId": issue_id, "body": message}
+        params = {"issueId": resolved_id, "body": message}
         if parent_id:
             params["parentId"] = parent_id
 
@@ -534,7 +602,10 @@ def comment_create(issue_id: str, message: Optional[str], parent_id: Optional[st
         if isinstance(result, dict):
             comment = result.get("comment", result.get("data", result))
             click.echo(f"\nComment added to issue {issue_id}:")
-            click.echo(format_comment(comment))
+            if isinstance(comment, dict):
+                click.echo(format_comment(comment))
+            else:
+                click.echo(str(result))
         else:
             click.echo(f"Comment added: {result}")
 
