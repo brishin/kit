@@ -50,6 +50,37 @@ A Python-based CLI tool using Click and Questionary that provides three main sub
    - Works correctly from within worktrees
    - Simple utility for quick navigation
 
+## Additional Tool: `linear`
+
+A command-line interface for Linear project management, powered by the Linear MCP server via mcp2py.
+
+### Features
+
+- **Issue Management**: List, view, create, and update Linear issues
+- **Comment Management**: View and add comments to issues
+- **OAuth 2.1 Authentication**: Automatic browser-based auth flow
+- **Interactive Prompts**: User-friendly questionary prompts
+- **Filtering**: Filter issues by assignee, status, label, and team
+
+### Quick Start
+
+```bash
+# Make executable (if needed)
+chmod +x linear
+
+# First run opens browser for OAuth
+linear issue list
+# Authenticate with Linear, tokens cached automatically
+
+# Common commands
+linear issue view LIN-123
+linear issue create --title "Fix bug"
+linear issue update LIN-123 --status "In Progress"
+linear comment create LIN-123 -m "Working on this"
+```
+
+See [LINEAR_CLI.md](LINEAR_CLI.md) for complete documentation.
+
 ## Setup
 
 ### Installation

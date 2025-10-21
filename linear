@@ -1,0 +1,457 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "mcp2py>=0.4.0",
+#   "click",
+#   "questionary",
+# ]
+# ///
+"""
+Linear CLI - Manage Linear issues and comments from the command line.
+
+Powered by the Linear MCP server via mcp2py.
+
+Usage:
+  linear issue list [--assignee USER] [--status STATUS] [--label LABEL]
+  linear issue view <issue-id>
+  linear issue create
+  linear issue update <issue-id> [--status STATUS] [--assignee USER] [--title TITLE]
+  linear comment list <issue-id>
+  linear comment create <issue-id> [--message MESSAGE]
+
+Setup:
+  On first run, browser opens for OAuth authentication.
+  Tokens are cached automatically for future use.
+"""
+
+import sys
+import os
+import json
+from typing import Optional
+
+import click
+import questionary
+from mcp2py import load
+from mcp2py.exceptions import (
+    MCPError,
+    MCPConnectionError,
+    MCPToolError,
+    MCPValidationError,
+)
+
+
+# Configuration
+LINEAR_MCP_COMMAND = os.environ.get("LINEAR_MCP_COMMAND", "pnpx mcp-remote https://mcp.linear.app/sse")
+_server_cache = None
+
+
+def get_server():
+    """Get or create Linear MCP server connection."""
+    global _server_cache
+
+    if _server_cache is not None:
+        return _server_cache
+
+    try:
+        # Connect to Linear MCP server via mcp-remote
+        # This bridges the remote SSE server to stdio for mcp2py
+        # OAuth will be handled by the remote server
+        _server_cache = load(LINEAR_MCP_COMMAND)
+        return _server_cache
+    except MCPConnectionError as e:
+        click.echo(f"Error: Failed to connect to Linear MCP server", err=True)
+        click.echo(f"  {e}", err=True)
+        click.echo(f"\nMake sure you have pnpm/pnpx installed.", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+def format_issue(issue_data: dict, detailed: bool = False) -> str:
+    """Format issue data for display."""
+    if isinstance(issue_data, str):
+        # If server returns a string, parse it or return as-is
+        try:
+            issue_data = json.loads(issue_data)
+        except (json.JSONDecodeError, TypeError):
+            return issue_data
+
+    if not isinstance(issue_data, dict):
+        return str(issue_data)
+
+    # Extract common fields
+    issue_id = issue_data.get("id", issue_data.get("identifier", "unknown"))
+    title = issue_data.get("title", "No title")
+    state = issue_data.get("state", issue_data.get("status", "unknown"))
+
+    if detailed:
+        # Detailed view
+        assignee = issue_data.get("assignee", {})
+        assignee_name = assignee.get("name", "Unassigned") if isinstance(assignee, dict) else str(assignee) if assignee else "Unassigned"
+
+        description = issue_data.get("description", "No description")
+        created_at = issue_data.get("createdAt", issue_data.get("created_at", "unknown"))
+        updated_at = issue_data.get("updatedAt", issue_data.get("updated_at", "unknown"))
+
+        output = []
+        output.append(f"\n{issue_id}: {title}")
+        output.append("=" * 80)
+        output.append(f"Status: {state}")
+        output.append(f"Assignee: {assignee_name}")
+        output.append(f"Created: {created_at}")
+        output.append(f"Updated: {updated_at}")
+        output.append(f"\nDescription:")
+        output.append(description or "(none)")
+        output.append("=" * 80)
+
+        return "\n".join(output)
+    else:
+        # Compact list view
+        return f"  {issue_id:<15} {state:<15} {title[:50]}"
+
+
+def format_comment(comment_data: dict) -> str:
+    """Format comment data for display."""
+    if isinstance(comment_data, str):
+        try:
+            comment_data = json.loads(comment_data)
+        except (json.JSONDecodeError, TypeError):
+            return comment_data
+
+    if not isinstance(comment_data, dict):
+        return str(comment_data)
+
+    author = comment_data.get("user", {})
+    author_name = author.get("name", "Unknown") if isinstance(author, dict) else str(author) if author else "Unknown"
+
+    body = comment_data.get("body", comment_data.get("text", ""))
+    created_at = comment_data.get("createdAt", comment_data.get("created_at", "unknown"))
+
+    return f"\n[{author_name}] {created_at}\n{body}\n{'-' * 40}"
+
+
+@click.group()
+def cli():
+    """Linear CLI - Manage Linear issues and comments."""
+    pass
+
+
+@cli.group()
+def issue():
+    """Manage Linear issues."""
+    pass
+
+
+@cli.group()
+def comment():
+    """Manage issue comments."""
+    pass
+
+
+@issue.command("list")
+@click.option("--assignee", help="Filter by assignee user ID or name")
+@click.option("--status", help="Filter by status (e.g., 'In Progress', 'Done')")
+@click.option("--label", help="Filter by label")
+@click.option("--team", help="Filter by team ID or name")
+@click.option("--limit", type=int, default=20, help="Maximum number of issues to return (default: 20)")
+def issue_list(assignee: Optional[str], status: Optional[str], label: Optional[str], team: Optional[str], limit: int):
+    """List Linear issues with optional filtering."""
+    server = get_server()
+
+    try:
+        # Build filter parameters
+        filters = {}
+        if assignee:
+            filters["assignee"] = assignee
+        if status:
+            filters["status"] = status
+        if label:
+            filters["label"] = label
+        if team:
+            filters["team"] = team
+        if limit:
+            filters["limit"] = limit
+
+        # Call list_issues tool
+        result = server.list_issues(**filters)
+
+        # Parse and format results
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(result)
+                return
+
+        if isinstance(result, dict):
+            issues = result.get("issues", result.get("data", []))
+        elif isinstance(result, list):
+            issues = result
+        else:
+            click.echo(str(result))
+            return
+
+        if not issues:
+            click.echo("No issues found.")
+            return
+
+        # Display header
+        click.echo(f"\n{'ISSUE ID':<15} {'STATUS':<15} TITLE")
+        click.echo("-" * 80)
+
+        # Display issues
+        for issue in issues:
+            click.echo(format_issue(issue, detailed=False))
+
+        click.echo(f"\nShowing {len(issues)} issue(s)")
+
+    except MCPToolError as e:
+        click.echo(f"Error calling list_issues: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@issue.command("view")
+@click.argument("issue_id")
+def issue_view(issue_id: str):
+    """View detailed information about a specific issue."""
+    server = get_server()
+
+    try:
+        result = server.get_issue(id=issue_id)
+
+        # Parse if string
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(result)
+                return
+
+        # Extract issue data
+        if isinstance(result, dict):
+            issue = result.get("issue", result.get("data", result))
+        else:
+            issue = result
+
+        click.echo(format_issue(issue, detailed=True))
+
+    except MCPToolError as e:
+        click.echo(f"Error: Issue not found or access denied: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@issue.command("create")
+@click.option("--title", help="Issue title")
+@click.option("--description", help="Issue description")
+@click.option("--assignee", help="Assignee user ID")
+@click.option("--team", help="Team ID")
+@click.option("--status", help="Initial status")
+def issue_create(title: Optional[str], description: Optional[str], assignee: Optional[str], team: Optional[str], status: Optional[str]):
+    """Create a new Linear issue."""
+    server = get_server()
+
+    # Interactive prompts for missing fields
+    if not title:
+        title = questionary.text("Issue title:").ask()
+        if not title:
+            click.echo("Error: Title is required", err=True)
+            sys.exit(1)
+
+    if not description:
+        description = questionary.text("Description (optional):").ask() or ""
+
+    if not team:
+        team = questionary.text("Team ID (optional):").ask() or None
+
+    if not assignee:
+        assignee = questionary.text("Assignee ID (optional):").ask() or None
+
+    if not status:
+        status = questionary.text("Status (optional):").ask() or None
+
+    try:
+        # Build create parameters
+        params = {"title": title}
+        if description:
+            params["description"] = description
+        if assignee:
+            params["assignee"] = assignee
+        if team:
+            params["team"] = team
+        if status:
+            params["status"] = status
+
+        result = server.create_issue(**params)
+
+        # Parse result
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(f"Issue created: {result}")
+                return
+
+        if isinstance(result, dict):
+            issue = result.get("issue", result.get("data", result))
+            issue_id = issue.get("id", issue.get("identifier", "unknown"))
+            click.echo(f"\nIssue created successfully: {issue_id}")
+            click.echo(format_issue(issue, detailed=True))
+        else:
+            click.echo(f"Issue created: {result}")
+
+    except MCPToolError as e:
+        click.echo(f"Error creating issue: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@issue.command("update")
+@click.argument("issue_id")
+@click.option("--title", help="New title")
+@click.option("--description", help="New description")
+@click.option("--status", help="New status")
+@click.option("--assignee", help="New assignee user ID")
+def issue_update(issue_id: str, title: Optional[str], description: Optional[str], status: Optional[str], assignee: Optional[str]):
+    """Update an existing Linear issue."""
+    server = get_server()
+
+    # At least one field must be provided
+    if not any([title, description, status, assignee]):
+        click.echo("Error: At least one field to update must be provided", err=True)
+        click.echo("Use --title, --description, --status, or --assignee", err=True)
+        sys.exit(1)
+
+    try:
+        # Build update parameters
+        params = {"id": issue_id}
+        if title:
+            params["title"] = title
+        if description:
+            params["description"] = description
+        if status:
+            params["status"] = status
+        if assignee:
+            params["assignee"] = assignee
+
+        result = server.update_issue(**params)
+
+        # Parse result
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(f"Issue updated: {result}")
+                return
+
+        if isinstance(result, dict):
+            issue = result.get("issue", result.get("data", result))
+            click.echo(f"\nIssue {issue_id} updated successfully")
+            click.echo(format_issue(issue, detailed=True))
+        else:
+            click.echo(f"Issue updated: {result}")
+
+    except MCPToolError as e:
+        click.echo(f"Error updating issue: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@comment.command("list")
+@click.argument("issue_id")
+def comment_list(issue_id: str):
+    """List comments for a specific issue."""
+    server = get_server()
+
+    try:
+        result = server.list_comments(issue_id=issue_id)
+
+        # Parse result
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(result)
+                return
+
+        if isinstance(result, dict):
+            comments = result.get("comments", result.get("data", []))
+        elif isinstance(result, list):
+            comments = result
+        else:
+            click.echo(str(result))
+            return
+
+        if not comments:
+            click.echo("No comments found.")
+            return
+
+        click.echo(f"\nComments for issue {issue_id}:")
+        click.echo("=" * 80)
+
+        for comment in comments:
+            click.echo(format_comment(comment))
+
+        click.echo(f"\nShowing {len(comments)} comment(s)")
+
+    except MCPToolError as e:
+        click.echo(f"Error listing comments: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@comment.command("create")
+@click.argument("issue_id")
+@click.option("--message", "-m", help="Comment text")
+def comment_create(issue_id: str, message: Optional[str]):
+    """Add a comment to an issue."""
+    server = get_server()
+
+    # Interactive prompt if message not provided
+    if not message:
+        message = questionary.text("Comment:").ask()
+        if not message:
+            click.echo("Error: Comment text is required", err=True)
+            sys.exit(1)
+
+    try:
+        result = server.create_comment(issue_id=issue_id, body=message)
+
+        # Parse result
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                click.echo(f"Comment added: {result}")
+                return
+
+        if isinstance(result, dict):
+            comment = result.get("comment", result.get("data", result))
+            click.echo(f"\nComment added to issue {issue_id}:")
+            click.echo(format_comment(comment))
+        else:
+            click.echo(f"Comment added: {result}")
+
+    except MCPToolError as e:
+        click.echo(f"Error creating comment: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()
