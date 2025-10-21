@@ -26,51 +26,52 @@ Optional flags:
 
 The websearch tool uses this optimized prompt by default:
 
-> "Provide comprehensive technical guidance for AI coding assistants. When multiple approaches exist, analyze pros/cons and tradeoffs explicitly. Include concrete code examples with explanations showing real-world implementation patterns. Address security considerations and performance implications relevant to the topic. Call out common pitfalls and mistakes to avoid. For technology comparisons or decisions, provide clear criteria for choosing between options. Organize your response clearly with section headers, but adapt the structure naturally to the question type. Prioritize actionable, practical information over theoretical concepts."
+> "Provide practical technical guidance for AI coding assistants. When multiple approaches exist, explain key tradeoffs. Include concrete code examples. Prioritize actionable information."
 
-This default is optimized for:
-- Comprehensive technical guidance
-- Pros/cons analysis of multiple approaches
-- Concrete code examples and implementation patterns
-- Security and performance considerations
-- Practical, actionable information
+**This concise default was optimized in Oct 2025** based on evaluation of 72 queries across diverse task types. It provides:
+- **33% faster response times** vs previous comprehensive prompt
+- **Balanced quality and latency** - appropriate detail without over-generation
+- **Code examples and tradeoff analysis** when relevant
+- **Practical, actionable information** focused on solving problems
+
+For details on the optimization, see `eval/RECOMMENDATIONS.md`.
 
 ## When to Override the System Prompt
 
-Use `--system "custom prompt"` when the default comprehensive approach is NOT appropriate:
+The default prompt works well for most queries. Use `--system "custom prompt"` when you need a different level of detail:
 
-### 1. Quick Reference / Syntax Lookups
-When you just need a direct answer without comprehensive analysis:
+### 1. Ultra-Minimal Queries (Single Facts)
+When you need just a quick factual answer:
 ```bash
-scripts/websearch --system "Provide a concise, direct answer with syntax example only" \
-  "What is the syntax for Python list comprehensions?"
-```
-
-### 2. Very Narrow Technical Facts
-When you need a specific piece of information without elaboration:
-```bash
-scripts/websearch --system "Provide a brief, factual answer" \
+scripts/websearch --system "Provide a brief, direct answer" \
   "What is the default port for PostgreSQL?"
 ```
 
-### 3. Conceptual/Theoretical Questions
-When you need conceptual understanding without code-heavy implementation:
+### 2. Comprehensive Deep Dives
+When you need exhaustive analysis with security, performance, and pitfall considerations:
+```bash
+scripts/websearch --system "Provide comprehensive technical guidance. Analyze pros/cons, security implications, performance tradeoffs, and common pitfalls explicitly." \
+  "How to implement OAuth2 authentication in production microservices?"
+```
+
+### 3. Conceptual/Theoretical Focus
+When you need conceptual understanding without code examples:
 ```bash
 scripts/websearch --system "Focus on conceptual understanding and theory. Minimize code examples" \
   "Explain the CAP theorem and its implications for distributed systems"
 ```
 
-### 4. High-Level Overview Only
-When you need a bird's-eye view before diving into details:
+### 4. High-Level Overview
+When you need architecture or bird's-eye view without implementation:
 ```bash
 scripts/websearch --system "Provide a high-level overview only, no implementation details" \
   "What is the overall architecture of Kubernetes?"
 ```
 
-**Default Rule:** Use the default prompt (no `--system` flag) for 95% of queries. Only override when:
-- The question is extremely narrow (single fact, single syntax)
-- The default's comprehensive style would add noise
-- You need a fundamentally different response style (conceptual-only, overview-only)
+**Guideline:** The default prompt is optimized for 90% of technical queries. Override when you need:
+- **Less detail** (ultra-minimal for single facts)
+- **More detail** (comprehensive for production/security-critical implementations)
+- **Different focus** (conceptual-only, architecture-only)
 
 # Question Phrasing Guidelines
 
