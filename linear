@@ -42,7 +42,7 @@ from mcp2py.exceptions import (
 
 
 # Configuration
-LINEAR_MCP_COMMAND = os.environ.get("LINEAR_MCP_COMMAND", "pnpx mcp-remote https://mcp.linear.app/sse")
+LINEAR_MCP_COMMAND = os.environ.get("LINEAR_MCP_COMMAND", "pnpx mcp-remote@latest https://mcp.linear.app/sse")
 _server_cache = None
 
 
@@ -151,28 +151,56 @@ def comment():
 
 
 @issue.command("list")
-@click.option("--assignee", help="Filter by assignee user ID or name")
-@click.option("--status", help="Filter by status (e.g., 'In Progress', 'Done')")
+@click.option("--assignee", help="Filter by assignee user ID or name (use 'me' for your issues)")
+@click.option("--state", help="Filter by state (status)")
 @click.option("--label", help="Filter by label")
 @click.option("--team", help="Filter by team ID or name")
-@click.option("--limit", type=int, default=20, help="Maximum number of issues to return (default: 20)")
-def issue_list(assignee: Optional[str], status: Optional[str], label: Optional[str], team: Optional[str], limit: int):
+@click.option("--limit", type=int, default=50, help="Maximum number of issues to return (default: 50)")
+@click.option("--before", help="Cursor for pagination (before)")
+@click.option("--after", help="Cursor for pagination (after)")
+@click.option("--order-by", default="updatedAt", help="Order by field (default: updatedAt)")
+@click.option("--query", help="Search query")
+@click.option("--cycle", help="Filter by cycle")
+@click.option("--project", help="Filter by project")
+@click.option("--include-archived", is_flag=True, help="Include archived issues")
+def issue_list(
+    assignee: Optional[str],
+    state: Optional[str],
+    label: Optional[str],
+    team: Optional[str],
+    limit: int,
+    before: Optional[str],
+    after: Optional[str],
+    order_by: str,
+    query: Optional[str],
+    cycle: Optional[str],
+    project: Optional[str],
+    include_archived: bool,
+):
     """List Linear issues with optional filtering."""
     server = get_server()
 
     try:
-        # Build filter parameters
-        filters = {}
+        # Build filter parameters matching the MCP server signature
+        filters = {"limit": limit, "orderBy": order_by, "includeArchived": include_archived}
         if assignee:
             filters["assignee"] = assignee
-        if status:
-            filters["status"] = status
+        if state:
+            filters["state"] = state
         if label:
             filters["label"] = label
         if team:
             filters["team"] = team
-        if limit:
-            filters["limit"] = limit
+        if before:
+            filters["before"] = before
+        if after:
+            filters["after"] = after
+        if query:
+            filters["query"] = query
+        if cycle:
+            filters["cycle"] = cycle
+        if project:
+            filters["project"] = project
 
         # Call list_issues tool
         result = server.list_issues(**filters)
@@ -251,43 +279,71 @@ def issue_view(issue_id: str):
 @issue.command("create")
 @click.option("--title", help="Issue title")
 @click.option("--description", help="Issue description")
+@click.option("--team", help="Team ID (required)")
 @click.option("--assignee", help="Assignee user ID")
-@click.option("--team", help="Team ID")
-@click.option("--status", help="Initial status")
-def issue_create(title: Optional[str], description: Optional[str], assignee: Optional[str], team: Optional[str], status: Optional[str]):
+@click.option("--state", help="Initial state (status)")
+@click.option("--priority", type=int, help="Priority (0-4)")
+@click.option("--project", help="Project ID")
+@click.option("--cycle", help="Cycle ID")
+@click.option("--parent-id", help="Parent issue ID for sub-issues")
+@click.option("--due-date", help="Due date (ISO format)")
+def issue_create(
+    title: Optional[str],
+    description: Optional[str],
+    team: Optional[str],
+    assignee: Optional[str],
+    state: Optional[str],
+    priority: Optional[int],
+    project: Optional[str],
+    cycle: Optional[str],
+    parent_id: Optional[str],
+    due_date: Optional[str],
+):
     """Create a new Linear issue."""
     server = get_server()
 
-    # Interactive prompts for missing fields
+    # Interactive prompts for missing required fields
     if not title:
         title = questionary.text("Issue title:").ask()
         if not title:
             click.echo("Error: Title is required", err=True)
             sys.exit(1)
 
-    if not description:
-        description = questionary.text("Description (optional):").ask() or ""
-
     if not team:
-        team = questionary.text("Team ID (optional):").ask() or None
+        team = questionary.text("Team ID (required):").ask()
+        if not team:
+            click.echo("Error: Team is required", err=True)
+            sys.exit(1)
+
+    # Optional prompts
+    if not description:
+        description = questionary.text("Description (optional):").ask() or None
 
     if not assignee:
         assignee = questionary.text("Assignee ID (optional):").ask() or None
 
-    if not status:
-        status = questionary.text("Status (optional):").ask() or None
+    if not state:
+        state = questionary.text("State (optional):").ask() or None
 
     try:
-        # Build create parameters
-        params = {"title": title}
+        # Build create parameters matching MCP server signature
+        params = {"title": title, "team": team}
         if description:
             params["description"] = description
         if assignee:
             params["assignee"] = assignee
-        if team:
-            params["team"] = team
-        if status:
-            params["status"] = status
+        if state:
+            params["state"] = state
+        if priority is not None:
+            params["priority"] = priority
+        if project:
+            params["project"] = project
+        if cycle:
+            params["cycle"] = cycle
+        if parent_id:
+            params["parentId"] = parent_id
+        if due_date:
+            params["dueDate"] = due_date
 
         result = server.create_issue(**params)
 
@@ -319,29 +375,59 @@ def issue_create(title: Optional[str], description: Optional[str], assignee: Opt
 @click.argument("issue_id")
 @click.option("--title", help="New title")
 @click.option("--description", help="New description")
-@click.option("--status", help="New status")
+@click.option("--state", help="New state (status)")
 @click.option("--assignee", help="New assignee user ID")
-def issue_update(issue_id: str, title: Optional[str], description: Optional[str], status: Optional[str], assignee: Optional[str]):
+@click.option("--priority", type=int, help="New priority (0-4)")
+@click.option("--project", help="New project ID")
+@click.option("--cycle", help="New cycle ID")
+@click.option("--parent-id", help="New parent issue ID")
+@click.option("--due-date", help="New due date (ISO format)")
+@click.option("--estimate", type=int, help="New estimate")
+def issue_update(
+    issue_id: str,
+    title: Optional[str],
+    description: Optional[str],
+    state: Optional[str],
+    assignee: Optional[str],
+    priority: Optional[int],
+    project: Optional[str],
+    cycle: Optional[str],
+    parent_id: Optional[str],
+    due_date: Optional[str],
+    estimate: Optional[int],
+):
     """Update an existing Linear issue."""
     server = get_server()
 
     # At least one field must be provided
-    if not any([title, description, status, assignee]):
+    if not any([title, description, state, assignee, priority is not None, project, cycle, parent_id, due_date, estimate is not None]):
         click.echo("Error: At least one field to update must be provided", err=True)
-        click.echo("Use --title, --description, --status, or --assignee", err=True)
+        click.echo("Use --title, --description, --state, --assignee, --priority, --project, --cycle, --parent-id, --due-date, or --estimate", err=True)
         sys.exit(1)
 
     try:
-        # Build update parameters
+        # Build update parameters matching MCP server signature
         params = {"id": issue_id}
         if title:
             params["title"] = title
         if description:
             params["description"] = description
-        if status:
-            params["status"] = status
+        if state:
+            params["state"] = state
         if assignee:
             params["assignee"] = assignee
+        if priority is not None:
+            params["priority"] = priority
+        if project:
+            params["project"] = project
+        if cycle:
+            params["cycle"] = cycle
+        if parent_id:
+            params["parentId"] = parent_id
+        if due_date:
+            params["dueDate"] = due_date
+        if estimate is not None:
+            params["estimate"] = estimate
 
         result = server.update_issue(**params)
 
@@ -375,7 +461,8 @@ def comment_list(issue_id: str):
     server = get_server()
 
     try:
-        result = server.list_comments(issue_id=issue_id)
+        # Match MCP server signature: list_comments(issueId: str)
+        result = server.list_comments(issueId=issue_id)
 
         # Parse result
         if isinstance(result, str):
@@ -416,7 +503,8 @@ def comment_list(issue_id: str):
 @comment.command("create")
 @click.argument("issue_id")
 @click.option("--message", "-m", help="Comment text")
-def comment_create(issue_id: str, message: Optional[str]):
+@click.option("--parent-id", help="Parent comment ID for threaded replies")
+def comment_create(issue_id: str, message: Optional[str], parent_id: Optional[str]):
     """Add a comment to an issue."""
     server = get_server()
 
@@ -428,7 +516,12 @@ def comment_create(issue_id: str, message: Optional[str]):
             sys.exit(1)
 
     try:
-        result = server.create_comment(issue_id=issue_id, body=message)
+        # Match MCP server signature: create_comment(issueId: str, parentId: str | None, body: str)
+        params = {"issueId": issue_id, "body": message}
+        if parent_id:
+            params["parentId"] = parent_id
+
+        result = server.create_comment(**params)
 
         # Parse result
         if isinstance(result, str):
