@@ -1,0 +1,13 @@
+{
+  "name": "skill-evaluator",
+  "version": "1.0.0",
+  "description": "Design and run systematic evaluations for Claude Code skills. Use when optimizing skill behavior, testing variations, or making data-driven improvements.",
+  "author": "Brian Sunter",
+  "skills": [
+    {
+      "name": "Skill Evaluator",
+      "path": "SKILL.md",
+      "description": "Design and run systematic evaluations for Claude Code skills. Use when optimizing skill behavior, testing variations, or making data-driven improvements to skills."
+    }
+  ]
+}

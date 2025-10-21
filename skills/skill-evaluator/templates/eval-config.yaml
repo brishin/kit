@@ -1,0 +1,99 @@
+# Evaluation Configuration
+# This file defines what to test, how to measure, and what constitutes success
+
+evaluation:
+  name: "example-evaluation"
+  skill: "my-skill"
+  objective: "Brief description of what you're trying to optimize or learn"
+  description: |
+    More detailed explanation of the evaluation purpose, hypothesis, and expected outcomes.
+
+# What variations are being tested?
+# Each variation represents a different configuration to compare
+variations:
+  - name: "baseline"
+    description: "Current/default behavior"
+    type: "prompt"  # or "flag", "model", "parameter", etc.
+    value: "Current system prompt or configuration"
+
+  - name: "optimized"
+    description: "Proposed improvement"
+    type: "prompt"
+    value: "New optimized prompt"
+
+# Test cases organized by category
+# Categories help analyze performance across different use case types
+test_cases:
+  category_1:
+    description: "Description of this category of tests"
+    cases:
+      - "Test case 1"
+      - "Test case 2"
+      - "Test case 3"
+
+  category_2:
+    description: "Another category"
+    cases:
+      - "Test case 4"
+      - "Test case 5"
+
+# Metrics to collect during evaluation
+metrics:
+  # Automatically collected quantitative metrics
+  quantitative:
+    - total_time        # Total execution time (seconds)
+    - ttft              # Time to first token (seconds, if applicable)
+    - input_tokens      # Input token count
+    - output_tokens     # Output token count
+    - char_length       # Response character length
+    - error_count       # Number of errors/failures
+
+  # Manually assessed qualitative metrics (1-5 scale)
+  qualitative:
+    - name: "completeness"
+      description: "Does the response fully address the query?"
+      scale: "1=Incomplete, 3=Adequate, 5=Comprehensive"
+
+    - name: "relevance"
+      description: "Is the response on-topic and useful?"
+      scale: "1=Off-topic, 3=Relevant, 5=Highly relevant"
+
+    - name: "quality"
+      description: "Overall quality of response"
+      scale: "1=Poor, 3=Good, 5=Excellent"
+
+# Decision criteria for making recommendations
+decision_criteria:
+  # Minimum acceptable improvement in latency (percentage)
+  latency_improvement_threshold: 25.0
+
+  # Minimum acceptable quality score (1-5 scale)
+  quality_threshold: 4.0
+
+  # Maximum acceptable quality degradation (percentage)
+  max_quality_degradation: 5.0
+
+  # Number of outputs to manually review for quality assessment
+  sample_size: 12
+
+  # Sampling strategy for quality review
+  sampling_strategy: "stratified"  # stratified, random, edge_cases
+
+# Execution configuration
+execution:
+  # Number of parallel workers
+  parallelism: 6
+
+  # Timeout per test (seconds)
+  timeout: 60
+
+  # Whether to stop on first failure
+  fail_fast: false
+
+  # Random seed for reproducibility
+  random_seed: 42
+
+# Note: The skill-evaluator generates custom evaluation code tailored to your use case
+# rather than using a generic command template. The generated run_evaluation.py will
+# include a custom run_test() function that knows how to invoke your specific tool,
+# parse its output, and collect relevant metrics.
