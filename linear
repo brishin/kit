@@ -116,6 +116,12 @@ class CommentData(TypedDict):
     user: UserData
 
 
+class TeamData(TypedDict):
+    id: str
+    name: str
+    key: str
+
+
 # ============================================================================
 # GraphQL Client
 # ============================================================================
@@ -301,6 +307,18 @@ mutation CreateComment($input: CommentCreateInput!) {
       body
       createdAt
       user { id name }
+    }
+  }
+}
+""")
+
+LIST_TEAMS_QUERY = gql_query("""
+query ListTeams {
+  teams {
+    nodes {
+      id
+      name
+      key
     }
   }
 }
@@ -644,13 +662,15 @@ def issue_view(issue_id: str) -> None:
 @issue.command("create")
 @click.option("--title", help="Issue title")
 @click.option("--description", help="Issue description")
-@click.option("--team", help="Team ID (required)")
+@click.option("--team", help="Team ID or key (e.g., FLA)")
+@click.option("--parent", help="Parent issue ID (to create a subtask)")
 @click.option("--assignee", help="Assignee user ID")
 @click.option("--priority", type=int, help="Priority (0-4)")
 def issue_create(
     title: Optional[str],
     description: Optional[str],
     team: Optional[str],
+    parent: Optional[str],
     assignee: Optional[str],
     priority: Optional[int],
 ) -> None:
@@ -664,25 +684,87 @@ def issue_create(
             click.echo("Error: Title is required", err=True)
             sys.exit(1)
 
+    # Fetch teams if not provided via command line
+    team_id = None
     if not team:
-        team = questionary.text("Team ID (required):").ask()
-        if not team:
-            click.echo("Error: Team is required", err=True)
+        try:
+            # Fetch available teams
+            result = client.execute(LIST_TEAMS_QUERY)
+            teams = result.get("teams", {}).get("nodes", [])
+
+            if not teams:
+                click.echo("Error: No teams found", err=True)
+                sys.exit(1)
+
+            # Create choices for questionary
+            choices = [
+                questionary.Choice(
+                    title=f"{t['key']} - {t['name']}",
+                    value=t['id']
+                )
+                for t in teams
+            ]
+
+            team_id = questionary.select(
+                "Select team:",
+                choices=choices
+            ).ask()
+
+            if not team_id:
+                click.echo("Error: Team selection is required", err=True)
+                sys.exit(1)
+
+        except Exception as e:
+            click.echo(f"Error fetching teams: {e}", err=True)
             sys.exit(1)
+    else:
+        # If team was provided, check if it's a key (like "FLA") or UUID
+        if all(c in '0123456789abcdef-' for c in team.lower()):
+            # It's a UUID
+            team_id = team
+        else:
+            # It's a team key, fetch the team to get UUID
+            try:
+                result = client.execute(LIST_TEAMS_QUERY)
+                teams = result.get("teams", {}).get("nodes", [])
+
+                # Find team by key
+                matching_team = next((t for t in teams if t['key'].lower() == team.lower()), None)
+
+                if matching_team:
+                    team_id = matching_team['id']
+                else:
+                    click.echo(f"Error: Team with key '{team}' not found", err=True)
+                    sys.exit(1)
+
+            except Exception as e:
+                click.echo(f"Error fetching teams: {e}", err=True)
+                sys.exit(1)
 
     # Optional prompts
     if not description:
         description = questionary.text("Description (optional):").ask() or None
 
+    # Resolve parent issue ID if provided
+    parent_id = None
+    if parent:
+        try:
+            parent_id = resolve_issue_id(client, parent)
+        except Exception as e:
+            click.echo(f"Error resolving parent issue: {e}", err=True)
+            sys.exit(1)
+
     try:
         # Build create input
         input_data: dict[str, Any] = {
             "title": title,
-            "teamId": team,
+            "teamId": team_id,
         }
 
         if description:
             input_data["description"] = description
+        if parent_id:
+            input_data["parentId"] = parent_id
         if assignee:
             input_data["assigneeId"] = assignee
         if priority is not None:
