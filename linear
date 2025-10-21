@@ -2,15 +2,16 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "mcp2py>=0.4.0",
+#   "gql[requests]>=3.5.0",
 #   "click",
 #   "questionary",
+#   "python-dotenv",
 # ]
 # ///
 """
 Linear CLI - Manage Linear issues and comments from the command line.
 
-Powered by the Linear MCP server via mcp2py.
+Powered by the Linear GraphQL API.
 
 Usage:
   linear issue list [--assignee USER] [--status STATUS] [--label LABEL]
@@ -21,93 +22,321 @@ Usage:
   linear comment create <issue-id> [--message MESSAGE]
 
 Setup:
-  On first run, browser opens for OAuth authentication.
-  Tokens are cached automatically for future use.
+  1. Generate a Personal API Key at: https://linear.app/settings/api
+  2. Add to ~/.env.local: LINEAR_API_KEY="lin_api_..."
+     (or set environment variable: export LINEAR_API_KEY="lin_api_...")
 """
 
 import sys
 import os
-import json
-from typing import Optional
+from pathlib import Path
+from typing import TypedDict, Optional, List, Any, NotRequired
 
-import click  # type: ignore
-import questionary  # type: ignore
-from mcp2py import load  # type: ignore
-from mcp2py.exceptions import (  # type: ignore
-    MCPError,
-    MCPConnectionError,
-    MCPToolError,
-    MCPValidationError,
-)
+import click
+import questionary
+from dotenv import load_dotenv
+from gql import Client, gql as gql_query
+from gql.transport.requests import RequestsHTTPTransport
+from gql.transport.exceptions import TransportQueryError
 
-
-# Configuration
-LINEAR_MCP_COMMAND = os.environ.get("LINEAR_MCP_COMMAND", "pnpx mcp-remote@latest https://mcp.linear.app/sse")
-_server_cache = None
+# Load environment variables from ~/.env.local
+load_dotenv(dotenv_path=Path.home() / ".env.local")
 
 
-def get_server():
-    """Get or create Linear MCP server connection."""
-    global _server_cache
+# ============================================================================
+# Type Definitions
+# ============================================================================
 
-    if _server_cache is not None:
-        return _server_cache
+# Priority is a scalar number (0-4), with separate priorityLabel field
 
-    try:
-        # Connect to Linear MCP server via mcp-remote
-        # This bridges the remote SSE server to stdio for mcp2py
-        # OAuth will be handled by the remote server
-        _server_cache = load(LINEAR_MCP_COMMAND)
-        return _server_cache
-    except MCPConnectionError as e:
-        click.echo(f"Error: Failed to connect to Linear MCP server", err=True)
-        click.echo(f"  {e}", err=True)
-        click.echo(f"\nMake sure you have pnpm/pnpx installed.", err=True)
+
+class StatusData(TypedDict):
+    id: str
+    name: str
+    type: NotRequired[str]  # "unstarted", "started", "completed", "canceled"
+
+
+class UserData(TypedDict):
+    id: str
+    name: str
+    email: NotRequired[str]
+
+
+class AttachmentData(TypedDict):
+    id: str
+    title: str
+    subtitle: NotRequired[str]
+    url: str
+
+
+class AttachmentsConnection(TypedDict):
+    nodes: List[AttachmentData]
+
+
+class IssueRef(TypedDict):
+    """Minimal issue reference (for parent/children)"""
+    id: str
+    identifier: str
+    title: NotRequired[str]
+    status: NotRequired[StatusData]
+    priority: NotRequired[float]
+    priorityLabel: NotRequired[str]
+    attachments: NotRequired[AttachmentsConnection]
+
+
+class ChildrenConnection(TypedDict):
+    nodes: List[IssueRef]
+
+
+class IssueData(TypedDict):
+    id: str
+    identifier: str
+    title: str
+    description: NotRequired[str]
+    priority: NotRequired[float]  # 0-4, where 0 is no priority, 1 is urgent, 4 is low
+    priorityLabel: NotRequired[str]  # "Urgent", "High", "Medium", "Low", "No priority"
+    status: StatusData
+    url: str
+    branchName: NotRequired[str]
+    createdAt: str
+    updatedAt: str
+    assignee: NotRequired[UserData]
+    creator: NotRequired[UserData]
+    project: NotRequired[dict[str, str]]
+    team: NotRequired[dict[str, str]]
+    parent: NotRequired[IssueRef]
+    children: NotRequired[ChildrenConnection]
+    attachments: NotRequired[AttachmentsConnection]
+
+
+class CommentData(TypedDict):
+    id: str
+    body: str
+    createdAt: str
+    user: UserData
+
+
+# ============================================================================
+# GraphQL Client
+# ============================================================================
+
+_client_cache: Optional[Client] = None
+
+
+def get_client() -> Client:
+    """Get or create GraphQL client connection."""
+    global _client_cache
+
+    if _client_cache is not None:
+        return _client_cache
+
+    api_key = os.environ.get("LINEAR_API_KEY")
+    if not api_key:
+        click.echo("Error: LINEAR_API_KEY not found", err=True)
+        click.echo("\nTo get an API key:", err=True)
+        click.echo("  1. Go to https://linear.app/settings/api", err=True)
+        click.echo("  2. Create a new Personal API Key", err=True)
+        click.echo("  3. Add to ~/.env.local: LINEAR_API_KEY='lin_api_...'", err=True)
+        click.echo("     (or set environment variable: export LINEAR_API_KEY='lin_api_...')", err=True)
         sys.exit(1)
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+
+    # Create transport with API key authentication
+    transport = RequestsHTTPTransport(
+        url="https://api.linear.app/graphql",
+        headers={"Authorization": api_key},
+        verify=True,
+        retries=3,
+    )
+
+    # Create and cache the client
+    _client_cache = Client(transport=transport, fetch_schema_from_transport=False)
+    return _client_cache
 
 
-def resolve_issue_id(server, identifier_or_id: str) -> str:
+# ============================================================================
+# GraphQL Queries
+# ============================================================================
+
+LIST_ISSUES_QUERY = gql_query("""
+query ListIssues($first: Int!) {
+  issues(first: $first, orderBy: updatedAt) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      status: state { id name }
+      priority
+      priorityLabel
+      url
+      parent { id identifier title }
+      children(first: 50) {
+        nodes {
+          id
+          identifier
+        }
+      }
+      attachments {
+        nodes {
+          id
+          title
+          subtitle
+          url
+        }
+      }
+      assignee { id name }
+      createdAt
+      updatedAt
+      project { id name }
+      team { name }
+    }
+  }
+}
+""")
+
+GET_ISSUE_QUERY = gql_query("""
+query GetIssue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    status: state { id name }
+    priority
+    priorityLabel
+    url
+    branchName
+    createdAt
+    updatedAt
+    parent { id identifier title }
+    children(first: 50) {
+      nodes {
+        id
+        identifier
+        title
+        status: state { id name type }
+        priority
+        priorityLabel
+        attachments {
+          nodes {
+            id
+            title
+            subtitle
+            url
+          }
+        }
+      }
+    }
+    attachments {
+      nodes {
+        id
+        title
+        subtitle
+        url
+      }
+    }
+    assignee { id name email }
+    creator { name }
+    project { name }
+    team { name }
+  }
+}
+""")
+
+LIST_COMMENTS_QUERY = gql_query("""
+query ListComments($issueId: String!) {
+  issue(id: $issueId) {
+    comments {
+      nodes {
+        id
+        body
+        createdAt
+        user { id name }
+      }
+    }
+  }
+}
+""")
+
+CREATE_ISSUE_MUTATION = gql_query("""
+mutation CreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      status: state { id name }
+      priority
+      priorityLabel
+    }
+  }
+}
+""")
+
+UPDATE_ISSUE_MUTATION = gql_query("""
+mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      status: state { id name }
+      priority
+      priorityLabel
+    }
+  }
+}
+""")
+
+CREATE_COMMENT_MUTATION = gql_query("""
+mutation CreateComment($input: CommentCreateInput!) {
+  commentCreate(input: $input) {
+    success
+    comment {
+      id
+      body
+      createdAt
+      user { id name }
+    }
+  }
+}
+""")
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def resolve_issue_id(client: Client, identifier_or_id: str) -> str:
     """
-    Resolve a human-readable identifier (e.g., 'LIN-123') to a UUID.
+    Resolve a human-readable identifier (e.g., 'FLA-123') to a UUID.
     If already a UUID, returns it as-is.
     """
     # Check if it's already a UUID (contains only hex chars and dashes)
     if all(c in '0123456789abcdef-' for c in identifier_or_id.lower()):
         return identifier_or_id
 
-    # It's a human-readable identifier, search for it
+    # It's a human-readable identifier, fetch from Linear directly
+    # Linear's issue() query accepts identifiers directly
+    search_query = gql_query("""
+    query GetIssueByIdentifier($id: String!) {
+      issue(id: $id) {
+        id
+        identifier
+      }
+    }
+    """)
+
     try:
-        # Search for the exact identifier
-        result = server.list_issues(query=identifier_or_id, limit=50)
+        result = client.execute(search_query, variable_values={"id": identifier_or_id})
+        issue = result.get("issue")
 
-        # Parse result
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
-
-        issues: list = []
-        if isinstance(result, dict):
-            issues_data = result.get("issues", result.get("data", []))
-            if isinstance(issues_data, list):
-                issues = issues_data
-        elif isinstance(result, list):
-            issues = result
-        else:
-            raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
-
-        # Find exact match by identifier
-        if issues:
-            for issue in issues:
-                if isinstance(issue, dict):
-                    issue_identifier = issue.get("identifier", "")
-                    issue_id = issue.get("id")
-                    if issue_identifier.upper() == identifier_or_id.upper() and issue_id:
-                        return str(issue_id)
+        if issue and issue.get("id"):
+            return str(issue["id"])
 
         raise ValueError(f"Could not find issue with identifier: {identifier_or_id}")
 
@@ -115,174 +344,269 @@ def resolve_issue_id(server, identifier_or_id: str) -> str:
         raise ValueError(f"Error resolving issue identifier '{identifier_or_id}': {e}")
 
 
-def format_issue(issue_data: dict, detailed: bool = False) -> str:
-    """Format issue data for display."""
-    if isinstance(issue_data, str):
-        # If server returns a string, parse it or return as-is
-        try:
-            issue_data = json.loads(issue_data)
-        except (json.JSONDecodeError, TypeError):
-            return issue_data
+def get_priority_icon(priority: Optional[float]) -> str:
+    """Get emoji icon for priority level."""
+    if priority is None or priority == 0:
+        return "⚪"  # No priority
 
-    if not isinstance(issue_data, dict):
-        return str(issue_data)
+    if priority == 1:
+        return "🔴"  # Urgent
+    elif priority == 2:
+        return "🟠"  # High
+    elif priority == 3:
+        return "🟡"  # Medium
+    elif priority == 4:
+        return "🟢"  # Low
+    else:
+        return "⚪"  # Unknown
 
-    # Extract common fields - prioritize human-readable identifier
-    issue_id = issue_data.get("identifier", issue_data.get("id", "unknown"))
+
+def count_pr_attachments(attachments: Optional[AttachmentsConnection]) -> int:
+    """Count GitHub PR attachments."""
+    if not attachments:
+        return 0
+
+    nodes = attachments.get("nodes", [])
+    return sum(1 for att in nodes if "github.com" in att.get("url", ""))
+
+
+def count_subissues(children: Optional[ChildrenConnection]) -> int:
+    """Count child issues (subissues)."""
+    if not children:
+        return 0
+    return len(children.get("nodes", []))
+
+
+def sort_issues_by_status(issues: List[IssueRef]) -> List[IssueRef]:
+    """
+    Sort issues by status type, with completed/canceled at the bottom.
+
+    Order: unstarted -> started -> canceled -> completed
+    Within each group, sort by most recently updated first.
+    """
+    # Define sort order for state types
+    state_type_order = {
+        "unstarted": 0,
+        "started": 1,
+        "canceled": 2,
+        "completed": 3,
+    }
+
+    def get_sort_key(issue: IssueRef) -> tuple[int, str]:
+        status = issue.get("status")
+        state_type = status.get("type", "unstarted") if status else "unstarted"
+
+        # Get priority for state type (lower is higher priority)
+        type_priority = state_type_order.get(state_type, 999)
+
+        # Return tuple: (state_type_priority, negative to sort desc by update time if available)
+        return (type_priority, "")
+
+    return sorted(issues, key=get_sort_key)
+
+
+def format_issue_compact(issue_data: IssueData | IssueRef, max_title_len: int = 40, show_parent_project: bool = True) -> str:
+    """Format issue in compact one-line view."""
+    issue_id = issue_data.get("identifier", "unknown")
     title = issue_data.get("title", "No title")
-    state = issue_data.get("state", issue_data.get("status", "unknown"))
+    status_obj = issue_data.get("status")
+    status = status_obj.get("name", "unknown") if status_obj else "unknown"
+    priority = issue_data.get("priority")
+
+    priority_icon = get_priority_icon(priority)
+
+    # Truncate title to fit
+    title_display = title[:max_title_len] + "..." if len(title) > max_title_len else title
+
+    # Build compact display
+    parts = [
+        f"[{issue_id}]",
+        f"[{status}]",
+        f"[{priority_icon}]",
+        title_display,
+    ]
+
+    # Add metadata indicators (only for full IssueData)
+    meta_parts = []
+
+    # Add PR and subissue counts
+    # Both IssueData and IssueRef can have attachments field
+    attachments_field = issue_data.get("attachments")
+    if attachments_field is not None:
+        pr_count = count_pr_attachments(attachments_field)
+        if pr_count > 0:
+            meta_parts.append(f"PRs: {pr_count}")
+
+    children_field = issue_data.get("children")
+    if children_field is not None:
+        sub_count = count_subissues(children_field)  # type: ignore
+        if sub_count > 0:
+            meta_parts.append(f"Subs: {sub_count} ↳")
+
+    # Add parent info if available and requested
+    if show_parent_project:
+        parent = issue_data.get("parent")
+        if parent and isinstance(parent, dict):
+            parent_id = parent.get("identifier", "unknown")
+            meta_parts.append(f"Parent: {parent_id}")
+
+        # Add project info if available
+        project = issue_data.get("project")
+        if project and isinstance(project, dict):
+            project_name = project.get("name")
+            if project_name:
+                meta_parts.append(f"Project: {project_name}")
+
+    if meta_parts:
+        parts.append(f"| {' | '.join(meta_parts)}")
+
+    return " ".join(parts)
+
+
+def format_issue(issue_data: IssueData, detailed: bool = False) -> str:
+    """Format issue data for display."""
+    issue_id = issue_data.get("identifier", "unknown")
+    title = issue_data.get("title", "No title")
+    status = issue_data.get("status", {}).get("name", "unknown")
+    priority = issue_data.get("priority")
 
     if detailed:
         # Detailed view
-        assignee = issue_data.get("assignee", {})
-        assignee_name = assignee.get("name", "Unassigned") if isinstance(assignee, dict) else str(assignee) if assignee else "Unassigned"
+        assignee = issue_data.get("assignee")
+        assignee_name = assignee.get("name", "Unassigned") if assignee else "Unassigned"
 
         description = issue_data.get("description", "No description")
-        created_at = issue_data.get("createdAt", issue_data.get("created_at", "unknown"))
-        updated_at = issue_data.get("updatedAt", issue_data.get("updated_at", "unknown"))
+        created_at = issue_data.get("createdAt", "unknown")
+        updated_at = issue_data.get("updatedAt", "unknown")
+        priority_label = issue_data.get("priorityLabel", "No priority")
+
+        # Parent issue
+        parent = issue_data.get("parent")
+        parent_str = f"{parent['identifier']}" if parent else "None"
+
+        # Project
+        project = issue_data.get("project")
+        project_str = project.get("name") if project and isinstance(project, dict) else "None"
+
+        # Children (subissues)
+        children_nodes = issue_data.get("children", {}).get("nodes", [])
+        # Sort children by status (done/canceled at bottom)
+        children_sorted = sort_issues_by_status(children_nodes)
+
+        # PR attachments
+        attachments = issue_data.get("attachments", {}).get("nodes", [])
+        pr_links = [att["url"] for att in attachments if "github.com" in att.get("url", "")]
 
         output = []
         output.append(f"\n{issue_id}: {title}")
         output.append("=" * 80)
-        output.append(f"Status: {state}")
+        output.append(f"Status: {status}")
+        output.append(f"Priority: {priority_label}")
         output.append(f"Assignee: {assignee_name}")
+        output.append(f"Project: {project_str}")
+        output.append(f"Parent: {parent_str}")
         output.append(f"Created: {created_at}")
         output.append(f"Updated: {updated_at}")
+
+        if children_sorted:
+            output.append(f"\nSubissues ({len(children_sorted)}):")
+            for child in children_sorted:
+                # Don't show parent/project for subissues (redundant in this context)
+                output.append(f"  {format_issue_compact(child, max_title_len=60, show_parent_project=False)}")
+
+                # Show PRs for this subissue as indented lines
+                child_attachments = child.get("attachments", {}).get("nodes", []) if isinstance(child.get("attachments"), dict) else []
+                child_pr_links = [att["url"] for att in child_attachments if "github.com" in att.get("url", "")]
+                for pr_url in child_pr_links:
+                    output.append(f"    → {pr_url}")
+
+        if pr_links:
+            output.append(f"\nPull Requests:")
+            for pr in pr_links:
+                output.append(f"  - {pr}")
+
         output.append(f"\nDescription:")
         output.append(description or "(none)")
         output.append("=" * 80)
 
         return "\n".join(output)
     else:
-        # Compact list view
-        return f"  {issue_id:<15} {state:<15} {title[:50]}"
+        # Compact list view - show parent and project
+        return format_issue_compact(issue_data, show_parent_project=True)
 
 
-def format_comment(comment_data: dict) -> str:
+def format_comment(comment_data: CommentData) -> str:
     """Format comment data for display."""
-    if isinstance(comment_data, str):
-        try:
-            comment_data = json.loads(comment_data)
-        except (json.JSONDecodeError, TypeError):
-            return comment_data
-
-    if not isinstance(comment_data, dict):
-        return str(comment_data)
-
-    author = comment_data.get("user", {})
-    author_name = author.get("name", "Unknown") if isinstance(author, dict) else str(author) if author else "Unknown"
-
-    body = comment_data.get("body", comment_data.get("text", ""))
-    created_at = comment_data.get("createdAt", comment_data.get("created_at", "unknown"))
+    user = comment_data.get("user", {})
+    author_name = user.get("name", "Unknown")
+    body = comment_data.get("body", "")
+    created_at = comment_data.get("createdAt", "unknown")
 
     return f"\n[{author_name}] {created_at}\n{body}\n{'-' * 40}"
 
 
+# ============================================================================
+# CLI Commands
+# ============================================================================
+
 @click.group()
-def cli():
+def cli() -> None:
     """Linear CLI - Manage Linear issues and comments."""
     pass
 
 
 @cli.group()
-def issue():
+def issue() -> None:
     """Manage Linear issues."""
     pass
 
 
 @cli.group()
-def comment():
+def comment() -> None:
     """Manage issue comments."""
     pass
 
 
 @issue.command("list")
-@click.option("--assignee", help="Filter by assignee user ID or name (use 'me' for your issues)")
+@click.option("--assignee", help="Filter by assignee user ID or name")
 @click.option("--state", help="Filter by state (status)")
 @click.option("--label", help="Filter by label")
-@click.option("--team", help="Filter by team ID or name")
+@click.option("--team", help="Filter by team key")
 @click.option("--limit", type=int, default=50, help="Maximum number of issues to return (default: 50)")
-@click.option("--before", help="Cursor for pagination (before)")
-@click.option("--after", help="Cursor for pagination (after)")
-@click.option("--order-by", default="updatedAt", help="Order by field (default: updatedAt)")
-@click.option("--query", help="Search query")
-@click.option("--cycle", help="Filter by cycle")
-@click.option("--project", help="Filter by project")
-@click.option("--include-archived", is_flag=True, help="Include archived issues")
 def issue_list(
     assignee: Optional[str],
     state: Optional[str],
     label: Optional[str],
     team: Optional[str],
     limit: int,
-    before: Optional[str],
-    after: Optional[str],
-    order_by: str,
-    query: Optional[str],
-    cycle: Optional[str],
-    project: Optional[str],
-    include_archived: bool,
-):
+) -> None:
     """List Linear issues with optional filtering."""
-    server = get_server()
+    client = get_client()
 
     try:
-        # Build filter parameters matching the MCP server signature
-        filters = {"limit": limit, "orderBy": order_by, "includeArchived": include_archived}
-        if assignee:
-            filters["assignee"] = assignee
-        if state:
-            filters["state"] = state
-        if label:
-            filters["label"] = label
-        if team:
-            filters["team"] = team
-        if before:
-            filters["before"] = before
-        if after:
-            filters["after"] = after
-        if query:
-            filters["query"] = query
-        if cycle:
-            filters["cycle"] = cycle
-        if project:
-            filters["project"] = project
+        # TODO: Add support for filters (assignee, state, label, team)
+        # Linear's GraphQL API has complex filter syntax that needs to be handled properly
+        if any([assignee, state, label, team]):
+            click.echo("Note: Filtering options are not yet implemented. Showing all issues.", err=True)
 
-        # Call list_issues tool
-        result = server.list_issues(**filters)
-
-        # Parse and format results
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(result)
-                return
-
-        if isinstance(result, dict):
-            issues = result.get("issues", result.get("data", []))
-        elif isinstance(result, list):
-            issues = result
-        else:
-            click.echo(str(result))
-            return
+        # Execute query
+        variables: dict[str, Any] = {"first": limit}
+        result = client.execute(LIST_ISSUES_QUERY, variable_values=variables)
+        issues = result.get("issues", {}).get("nodes", [])
 
         if not issues:
             click.echo("No issues found.")
             return
 
-        # Display header
-        click.echo(f"\n{'ISSUE ID':<15} {'STATUS':<15} TITLE")
-        click.echo("-" * 80)
-
         # Display issues
+        click.echo()
         for issue in issues:
             click.echo(format_issue(issue, detailed=False))
 
         click.echo(f"\nShowing {len(issues)} issue(s)")
 
-    except MCPToolError as e:
-        click.echo(f"Error calling list_issues: {e}", err=True)
+    except TransportQueryError as e:
+        click.echo(f"Error: GraphQL query failed: {e}", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -291,37 +615,25 @@ def issue_list(
 
 @issue.command("view")
 @click.argument("issue_id")
-def issue_view(issue_id: str):
+def issue_view(issue_id: str) -> None:
     """View detailed information about a specific issue."""
-    server = get_server()
+    client = get_client()
 
     try:
         # Resolve human-readable identifier to UUID if needed
-        resolved_id = resolve_issue_id(server, issue_id)
-        result = server.get_issue(id=resolved_id)
+        resolved_id = resolve_issue_id(client, issue_id)
 
-        # Parse if string
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(result)
-                return
+        # Execute query
+        result = client.execute(GET_ISSUE_QUERY, variable_values={"id": resolved_id})
+        issue = result.get("issue")
 
-        # Extract issue data
-        if isinstance(result, dict):
-            issue = result.get("issue", result.get("data", result))
-            if not isinstance(issue, dict):
-                issue = result
-        else:
-            issue = result if isinstance(result, dict) else {}
+        if not issue:
+            click.echo(f"Error: Issue {issue_id} not found", err=True)
+            sys.exit(1)
 
-        if isinstance(issue, dict):
-            click.echo(format_issue(issue, detailed=True))
-        else:
-            click.echo(str(issue))
+        click.echo(format_issue(issue, detailed=True))
 
-    except MCPToolError as e:
+    except TransportQueryError as e:
         click.echo(f"Error: Issue not found or access denied: {e}", err=True)
         sys.exit(1)
     except Exception as e:
@@ -334,26 +646,16 @@ def issue_view(issue_id: str):
 @click.option("--description", help="Issue description")
 @click.option("--team", help="Team ID (required)")
 @click.option("--assignee", help="Assignee user ID")
-@click.option("--state", help="Initial state (status)")
 @click.option("--priority", type=int, help="Priority (0-4)")
-@click.option("--project", help="Project ID")
-@click.option("--cycle", help="Cycle ID")
-@click.option("--parent-id", help="Parent issue ID for sub-issues")
-@click.option("--due-date", help="Due date (ISO format)")
 def issue_create(
     title: Optional[str],
     description: Optional[str],
     team: Optional[str],
     assignee: Optional[str],
-    state: Optional[str],
     priority: Optional[int],
-    project: Optional[str],
-    cycle: Optional[str],
-    parent_id: Optional[str],
-    due_date: Optional[str],
-):
+) -> None:
     """Create a new Linear issue."""
-    server = get_server()
+    client = get_client()
 
     # Interactive prompts for missing required fields
     if not title:
@@ -372,54 +674,32 @@ def issue_create(
     if not description:
         description = questionary.text("Description (optional):").ask() or None
 
-    if not assignee:
-        assignee = questionary.text("Assignee ID (optional):").ask() or None
-
-    if not state:
-        state = questionary.text("State (optional):").ask() or None
-
     try:
-        # Build create parameters matching MCP server signature
-        params = {"title": title, "team": team}
+        # Build create input
+        input_data: dict[str, Any] = {
+            "title": title,
+            "teamId": team,
+        }
+
         if description:
-            params["description"] = description
+            input_data["description"] = description
         if assignee:
-            params["assignee"] = assignee
-        if state:
-            params["state"] = state
+            input_data["assigneeId"] = assignee
         if priority is not None:
-            params["priority"] = priority
-        if project:
-            params["project"] = project
-        if cycle:
-            params["cycle"] = cycle
-        if parent_id:
-            params["parentId"] = parent_id
-        if due_date:
-            params["dueDate"] = due_date
+            input_data["priority"] = priority
 
-        result = server.create_issue(**params)
+        # Execute mutation
+        result = client.execute(CREATE_ISSUE_MUTATION, variable_values={"input": input_data})
 
-        # Parse result
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(f"Issue created: {result}")
-                return
-
-        if isinstance(result, dict):
-            issue = result.get("issue", result.get("data", result))
-            if isinstance(issue, dict):
-                issue_id = issue.get("id", issue.get("identifier", "unknown"))
-                click.echo(f"\nIssue created successfully: {issue_id}")
-                click.echo(format_issue(issue, detailed=True))
-            else:
-                click.echo(f"Issue created: {result}")
+        if result.get("issueCreate", {}).get("success"):
+            issue = result["issueCreate"]["issue"]
+            click.echo(f"\nIssue created successfully: {issue['identifier']}")
+            click.echo(format_issue(issue, detailed=True))
         else:
-            click.echo(f"Issue created: {result}")
+            click.echo("Error: Failed to create issue", err=True)
+            sys.exit(1)
 
-    except MCPToolError as e:
+    except TransportQueryError as e:
         click.echo(f"Error creating issue: {e}", err=True)
         sys.exit(1)
     except Exception as e:
@@ -431,14 +711,9 @@ def issue_create(
 @click.argument("issue_id")
 @click.option("--title", help="New title")
 @click.option("--description", help="New description")
-@click.option("--state", help="New state (status)")
+@click.option("--state", help="New state ID")
 @click.option("--assignee", help="New assignee user ID")
 @click.option("--priority", type=int, help="New priority (0-4)")
-@click.option("--project", help="New project ID")
-@click.option("--cycle", help="New cycle ID")
-@click.option("--parent-id", help="New parent issue ID")
-@click.option("--due-date", help="New due date (ISO format)")
-@click.option("--estimate", type=int, help="New estimate")
 def issue_update(
     issue_id: str,
     title: Optional[str],
@@ -446,69 +721,49 @@ def issue_update(
     state: Optional[str],
     assignee: Optional[str],
     priority: Optional[int],
-    project: Optional[str],
-    cycle: Optional[str],
-    parent_id: Optional[str],
-    due_date: Optional[str],
-    estimate: Optional[int],
-):
+) -> None:
     """Update an existing Linear issue."""
-    server = get_server()
+    client = get_client()
 
     # At least one field must be provided
-    if not any([title, description, state, assignee, priority is not None, project, cycle, parent_id, due_date, estimate is not None]):
+    if not any([title, description, state, assignee, priority is not None]):
         click.echo("Error: At least one field to update must be provided", err=True)
-        click.echo("Use --title, --description, --state, --assignee, --priority, --project, --cycle, --parent-id, --due-date, or --estimate", err=True)
+        click.echo("Use --title, --description, --state, --assignee, or --priority", err=True)
         sys.exit(1)
 
     try:
         # Resolve human-readable identifier to UUID if needed
-        resolved_id = resolve_issue_id(server, issue_id)
+        resolved_id = resolve_issue_id(client, issue_id)
 
-        # Build update parameters matching MCP server signature
-        params: dict = {"id": resolved_id}
+        # Build update input
+        input_data: dict[str, Any] = {}
+
         if title:
-            params["title"] = title
+            input_data["title"] = title
         if description:
-            params["description"] = description
+            input_data["description"] = description
         if state:
-            params["state"] = state
+            input_data["stateId"] = state
         if assignee:
-            params["assignee"] = assignee
+            input_data["assigneeId"] = assignee
         if priority is not None:
-            params["priority"] = priority
-        if project:
-            params["project"] = project
-        if cycle:
-            params["cycle"] = cycle
-        if parent_id:
-            params["parentId"] = parent_id
-        if due_date:
-            params["dueDate"] = due_date
-        if estimate is not None:
-            params["estimate"] = estimate
+            input_data["priority"] = priority
 
-        result = server.update_issue(**params)
+        # Execute mutation
+        result = client.execute(
+            UPDATE_ISSUE_MUTATION,
+            variable_values={"id": resolved_id, "input": input_data}
+        )
 
-        # Parse result
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(f"Issue updated: {result}")
-                return
-
-        if isinstance(result, dict):
-            issue = result.get("issue", result.get("data", result))
+        if result.get("issueUpdate", {}).get("success"):
+            issue = result["issueUpdate"]["issue"]
             click.echo(f"\nIssue {issue_id} updated successfully")
-            if isinstance(issue, dict):
-                click.echo(format_issue(issue, detailed=True))
-            else:
-                click.echo(str(result))
+            click.echo(format_issue(issue, detailed=True))
         else:
-            click.echo(f"Issue updated: {result}")
+            click.echo("Error: Failed to update issue", err=True)
+            sys.exit(1)
 
-    except MCPToolError as e:
+    except TransportQueryError as e:
         click.echo(f"Error updating issue: {e}", err=True)
         sys.exit(1)
     except Exception as e:
@@ -518,32 +773,17 @@ def issue_update(
 
 @comment.command("list")
 @click.argument("issue_id")
-def comment_list(issue_id: str):
+def comment_list(issue_id: str) -> None:
     """List comments for a specific issue."""
-    server = get_server()
+    client = get_client()
 
     try:
         # Resolve human-readable identifier to UUID if needed
-        resolved_id = resolve_issue_id(server, issue_id)
+        resolved_id = resolve_issue_id(client, issue_id)
 
-        # Match MCP server signature: list_comments(issueId: str)
-        result = server.list_comments(issueId=resolved_id)
-
-        # Parse result
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(result)
-                return
-
-        if isinstance(result, dict):
-            comments = result.get("comments", result.get("data", []))
-        elif isinstance(result, list):
-            comments = result
-        else:
-            click.echo(str(result))
-            return
+        # Execute query
+        result = client.execute(LIST_COMMENTS_QUERY, variable_values={"issueId": resolved_id})
+        comments = result.get("issue", {}).get("comments", {}).get("nodes", [])
 
         if not comments:
             click.echo("No comments found.")
@@ -557,7 +797,7 @@ def comment_list(issue_id: str):
 
         click.echo(f"\nShowing {len(comments)} comment(s)")
 
-    except MCPToolError as e:
+    except TransportQueryError as e:
         click.echo(f"Error listing comments: {e}", err=True)
         sys.exit(1)
     except Exception as e:
@@ -568,10 +808,9 @@ def comment_list(issue_id: str):
 @comment.command("create")
 @click.argument("issue_id")
 @click.option("--message", "-m", help="Comment text")
-@click.option("--parent-id", help="Parent comment ID for threaded replies")
-def comment_create(issue_id: str, message: Optional[str], parent_id: Optional[str]):
+def comment_create(issue_id: str, message: Optional[str]) -> None:
     """Add a comment to an issue."""
-    server = get_server()
+    client = get_client()
 
     # Interactive prompt if message not provided
     if not message:
@@ -582,34 +821,26 @@ def comment_create(issue_id: str, message: Optional[str], parent_id: Optional[st
 
     try:
         # Resolve human-readable identifier to UUID if needed
-        resolved_id = resolve_issue_id(server, issue_id)
+        resolved_id = resolve_issue_id(client, issue_id)
 
-        # Match MCP server signature: create_comment(issueId: str, parentId: str | None, body: str)
-        params = {"issueId": resolved_id, "body": message}
-        if parent_id:
-            params["parentId"] = parent_id
+        # Build input
+        input_data = {
+            "issueId": resolved_id,
+            "body": message,
+        }
 
-        result = server.create_comment(**params)
+        # Execute mutation
+        result = client.execute(CREATE_COMMENT_MUTATION, variable_values={"input": input_data})
 
-        # Parse result
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                click.echo(f"Comment added: {result}")
-                return
-
-        if isinstance(result, dict):
-            comment = result.get("comment", result.get("data", result))
+        if result.get("commentCreate", {}).get("success"):
+            comment = result["commentCreate"]["comment"]
             click.echo(f"\nComment added to issue {issue_id}:")
-            if isinstance(comment, dict):
-                click.echo(format_comment(comment))
-            else:
-                click.echo(str(result))
+            click.echo(format_comment(comment))
         else:
-            click.echo(f"Comment added: {result}")
+            click.echo("Error: Failed to create comment", err=True)
+            sys.exit(1)
 
-    except MCPToolError as e:
+    except TransportQueryError as e:
         click.echo(f"Error creating comment: {e}", err=True)
         sys.exit(1)
     except Exception as e:
