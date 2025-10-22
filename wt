@@ -237,8 +237,24 @@ def cleanup():
     )
 
     if not pr_status or pr_status == "null":
-        print("❌ No merged PR found for this branch")
-        print(f"→ Keeping branch '{current_branch}' (has unmerged commits)")
+        print("⚠️  No merged PR found for this branch")
+        print(f"   Branch '{current_branch}' has {unique_commits} unmerged commit(s)")
+        print()
+        confirm_delete = questionary.confirm(
+            "Delete branch and worktree anyway?",
+            default=False
+        ).ask()
+        if not confirm_delete:
+            print("Aborted.")
+            sys.exit(0)
+        print()
+        print("→ Proceeding with deletion")
+        worktree_path = os.getcwd()
+        run_command("git checkout --detach origin/main", capture=False)
+        run_command(f"git branch -D {current_branch}", capture=False)
+        print(f"✓ Deleted branch '{current_branch}'")
+        run_command(f"git worktree remove --force {worktree_path}", capture=False)
+        print(f"✓ Deleted worktree at '{worktree_path}'")
         sys.exit(0)
 
     # Extract PR details
