@@ -29,6 +29,8 @@ Setup:
 
 import sys
 import os
+import re
+import subprocess
 from pathlib import Path
 from typing import TypedDict, Optional, List, Any, NotRequired
 
@@ -395,6 +397,98 @@ def count_subissues(children: Optional[ChildrenConnection]) -> int:
     return len(children.get("nodes", []))
 
 
+def get_pr_changed_files(pr_url: str) -> Optional[List[str]]:
+    """
+    Fetch changed files for a GitHub PR using gh CLI.
+
+    Args:
+        pr_url: GitHub PR URL (e.g., https://github.com/owner/repo/pull/123)
+
+    Returns:
+        List of changed file paths, or None if fetch fails
+    """
+    try:
+        # Extract owner, repo, and PR number from URL using regex
+        # Format: https://github.com/owner/repo/pull/123
+        match = re.match(r'https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)', pr_url.rstrip('/'))
+        if not match:
+            return None
+
+        owner, repo, pr_number = match.groups()
+
+        result = subprocess.run(
+            ['gh', 'pr', 'view', pr_number, '--repo', f'{owner}/{repo}', '--json', 'files', '--jq', '.files[].path'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return None
+
+        # Parse output - one file per line
+        files = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+        return files
+
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def format_pr_files(pr_urls: List[str], show_all_pr_files: bool, indent: str = "  ") -> tuple[List[str], int]:
+    """
+    Format PR URLs with their changed files.
+
+    Args:
+        pr_urls: List of GitHub PR URLs
+        show_all_pr_files: Whether to show all files or limit to 20
+        indent: Indentation string for the PR URL line
+
+    Returns:
+        Tuple of (output_lines, total_files_fetched)
+    """
+    output: List[str] = []
+    file_limit = 20
+    total_files_fetched = 0
+
+    for pr_url in pr_urls:
+        output.append(f"{indent}- {pr_url}")
+
+        # Check if we should stop fetching (optimization)
+        if not show_all_pr_files and total_files_fetched >= file_limit:
+            output.append(f"{indent}    (Skipped fetching - already showing {file_limit} files. Use --show-all-pr-files to see all.)")
+            continue
+
+        # Fetch changed files for this PR
+        changed_files = get_pr_changed_files(pr_url)
+
+        if changed_files:
+            total_pr_files = len(changed_files)
+            total_files_fetched += total_pr_files
+
+            # Calculate how many files to show from this PR
+            if show_all_pr_files:
+                files_to_show = changed_files
+            else:
+                remaining_budget = file_limit - (total_files_fetched - total_pr_files)
+                files_to_show = changed_files[:remaining_budget]
+
+            # Display files
+            for file_path in files_to_show:
+                output.append(f"{indent}    {file_path}")
+
+            # Show truncation message if needed
+            if not show_all_pr_files and len(files_to_show) < total_pr_files:
+                remaining = total_pr_files - len(files_to_show)
+                output.append(f"{indent}    ... and {remaining} more file(s) in this PR. Use --show-all-pr-files to see all.")
+
+        elif changed_files is None:
+            output.append(f"{indent}    (Unable to fetch changed files)")
+        else:
+            output.append(f"{indent}    (No files changed)")
+
+    return output, total_files_fetched
+
+
 def sort_issues_by_status(issues: List[IssueRef]) -> List[IssueRef]:
     """
     Sort issues by status type, with completed/canceled at the bottom.
@@ -481,7 +575,7 @@ def format_issue_compact(issue_data: IssueData | IssueRef, max_title_len: int = 
     return " ".join(parts)
 
 
-def format_issue(issue_data: IssueData, detailed: bool = False) -> str:
+def format_issue(issue_data: IssueData, detailed: bool = False, show_all_pr_files: bool = False) -> str:
     """Format issue data for display."""
     issue_id = issue_data.get("identifier", "unknown")
     title = issue_data.get("title", "No title")
@@ -511,7 +605,7 @@ def format_issue(issue_data: IssueData, detailed: bool = False) -> str:
         # Sort children by status (done/canceled at bottom)
         children_sorted = sort_issues_by_status(children_nodes)
 
-        # PR attachments
+        # PR attachments for main issue
         attachments = issue_data.get("attachments", {}).get("nodes", [])
         pr_links = [att["url"] for att in attachments if "github.com" in att.get("url", "")]
 
@@ -526,22 +620,69 @@ def format_issue(issue_data: IssueData, detailed: bool = False) -> str:
         output.append(f"Created: {created_at}")
         output.append(f"Updated: {updated_at}")
 
+        # Track total files shown across all PRs (main issue + subissues)
+        file_limit = 20
+        total_files_shown = 0
+
+        # Show main issue PRs first
+        if pr_links:
+            output.append(f"\nPull Requests:")
+            pr_output, files_count = format_pr_files(pr_links, show_all_pr_files, indent="  ")
+            output.extend(pr_output)
+            total_files_shown += files_count
+
+        # Show subissues
         if children_sorted:
             output.append(f"\nSubissues ({len(children_sorted)}):")
+
             for child in children_sorted:
                 # Don't show parent/project for subissues (redundant in this context)
                 output.append(f"  {format_issue_compact(child, max_title_len=60, show_parent_project=False)}")
 
-                # Show PRs for this subissue as indented lines
+                # Show PRs for this subissue
                 child_attachments = child.get("attachments", {}).get("nodes", []) if isinstance(child.get("attachments"), dict) else []
                 child_pr_links = [att["url"] for att in child_attachments if "github.com" in att.get("url", "")]
-                for pr_url in child_pr_links:
-                    output.append(f"    → {pr_url}")
 
-        if pr_links:
-            output.append(f"\nPull Requests:")
-            for pr in pr_links:
-                output.append(f"  - {pr}")
+                if child_pr_links:
+                    # Check if we should stop fetching more files
+                    if not show_all_pr_files and total_files_shown >= file_limit:
+                        # Just show PR URLs without fetching files
+                        for pr_url in child_pr_links:
+                            output.append(f"    → {pr_url}")
+                            output.append(f"        (Skipped fetching - already showing {file_limit} files. Use --show-all-pr-files to see all.)")
+                    else:
+                        # Format with helper, accounting for budget already used
+                        for pr_url in child_pr_links:
+                            output.append(f"    → {pr_url}")
+
+                            # Fetch and show files
+                            changed_files = get_pr_changed_files(pr_url)
+
+                            if changed_files:
+                                total_pr_files = len(changed_files)
+
+                                # Calculate remaining budget
+                                if show_all_pr_files:
+                                    files_to_show = changed_files
+                                else:
+                                    remaining_budget = file_limit - total_files_shown
+                                    files_to_show = changed_files[:remaining_budget]
+
+                                # Display files
+                                for file_path in files_to_show:
+                                    output.append(f"        {file_path}")
+
+                                total_files_shown += len(files_to_show)
+
+                                # Show truncation message if needed
+                                if not show_all_pr_files and len(files_to_show) < total_pr_files:
+                                    remaining = total_pr_files - len(files_to_show)
+                                    output.append(f"        ... and {remaining} more file(s) in this PR. Use --show-all-pr-files to see all.")
+
+                            elif changed_files is None:
+                                output.append(f"        (Unable to fetch changed files)")
+                            else:
+                                output.append(f"        (No files changed)")
 
         output.append(f"\nDescription:")
         output.append(description or "(none)")
@@ -633,7 +774,8 @@ def issue_list(
 
 @issue.command("view")
 @click.argument("issue_id")
-def issue_view(issue_id: str) -> None:
+@click.option("--show-all-pr-files", is_flag=True, help="Show all changed files for PRs (default: limited to 20)")
+def issue_view(issue_id: str, show_all_pr_files: bool) -> None:
     """View detailed information about a specific issue."""
     client = get_client()
 
@@ -649,7 +791,7 @@ def issue_view(issue_id: str) -> None:
             click.echo(f"Error: Issue {issue_id} not found", err=True)
             sys.exit(1)
 
-        click.echo(format_issue(issue, detailed=True))
+        click.echo(format_issue(issue, detailed=True, show_all_pr_files=show_all_pr_files))
 
     except TransportQueryError as e:
         click.echo(f"Error: Issue not found or access denied: {e}", err=True)
