@@ -87,18 +87,29 @@ Make sure to keep non-plan content if present.
 
 ## Linear CLI Quick Reference
 
-Common commands used in this workflow:
-
+**View Issues:**
 ```bash
-# View issue with full details
-./linear issue view <ISSUE-ID>
+linear issue view <ISSUE-ID>                      # Full details
+linear issue view <ISSUE-ID> --show-all-pr-files  # Expand all PR files (not truncated)
+```
 
-# View issue with all PR files shown (instead of truncated)
-./linear issue view <ISSUE-ID> --show-all-pr-files
+**Create Issues:**
+```bash
+linear issue create --team FLA --title "..." --description "..." --parent <PARENT-ID> --priority 0-4
+# Team required for subtasks (--parent doesn't auto-set team)
+# Parent linkage happens at creation time (no update --parent option)
+# Priority: 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low
+```
 
-# Update issue description with plan
-./linear issue update <ISSUE-ID> --description "# Implementation Plan (date)\n{content}\n---"
+**Update Issues:**
+```bash
+linear issue update <ISSUE-ID> --description "..."  # Replace description
+linear issue update <ISSUE-ID> --title "..."        # Update title
+linear issue update <ISSUE-ID> --status "..."       # Change status
+# Note: No --parent option (set at creation only)
+```
 
-# View comments
-./linear comment list <ISSUE-ID>
+**Comments:**
+```bash
+linear comment list <ISSUE-ID>  # View all comments
 ```
