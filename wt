@@ -67,12 +67,17 @@ def cli():
 @click.argument("branch_name")
 @click.option("--prefix", default="bs", help="Branch prefix (default: bs)")
 @click.option("--base", "-b", default="main", help="Base branch to branch from (default: main)")
-def create(branch_name, prefix, base):
+@click.option("--remote", "-r", is_flag=True, help="Create worktree from existing remote branch")
+def create(branch_name, prefix, base, remote):
     """Create a git worktree with standardized naming.
 
     Example: wt create resend-email
       -> Creates branch: bs/resend-email
       -> Creates worktree at: ./.worktrees/bs-resend-email
+
+    Example with remote: wt create --remote feature-branch
+      -> Tracks origin/feature-branch as feature-branch
+      -> Creates worktree at: ./.worktrees/feature-branch
     """
     # Check if we're in a git repo
     if not check_git_repo():
@@ -89,12 +94,36 @@ def create(branch_name, prefix, base):
     # The main repo root is the parent of the .git directory
     git_root = str(Path(git_common_dir).parent.resolve())
 
-    # Remove any existing prefix if user provided it
-    branch_base = branch_name.replace(f"{prefix}/", "")
+    if remote:
+        # Remote branch mode: use branch name as-is, no prefix
+        full_branch = branch_name
+        # Replace slashes with dashes for directory name to avoid nested directories
+        worktree_dir_name = branch_name.replace("/", "-")
+        worktree_dir = os.path.join(git_root, ".worktrees", worktree_dir_name)
 
-    # Construct the full branch name and directory (relative to git root)
-    full_branch = f"{prefix}/{branch_base}"
-    worktree_dir = os.path.join(git_root, ".worktrees", f"{prefix}-{branch_base}")
+        # Fetch latest from origin to ensure up-to-date refs
+        print("🔄 Fetching from origin...")
+        run_command("git fetch origin", capture=False)
+        print()
+
+        # Check if branch exists on origin
+        remote_ref_check = run_command(
+            f"git ls-remote --heads origin refs/heads/{branch_name}",
+            check=False
+        )
+        if not remote_ref_check:
+            print(f"❌ Error: Branch '{branch_name}' does not exist on origin")
+            sys.exit(1)
+
+        print(f"✓ Found remote branch: origin/{branch_name}")
+    else:
+        # Regular mode: apply prefix convention
+        # Remove any existing prefix if user provided it
+        branch_base = branch_name.replace(f"{prefix}/", "")
+
+        # Construct the full branch name and directory (relative to git root)
+        full_branch = f"{prefix}/{branch_base}"
+        worktree_dir = os.path.join(git_root, ".worktrees", f"{prefix}-{branch_base}")
 
     print(f"Branch: {full_branch}")
     print(f"Worktree directory: {worktree_dir}")
@@ -110,12 +139,11 @@ def create(branch_name, prefix, base):
         print(worktree_list if worktree_list else "")
         sys.exit(1)
 
-    # Check if branch already exists
-    branch_exists = run_command(f"git rev-parse --verify {full_branch}") is not None
-    if branch_exists:
-        print(f"⚠️  Branch {full_branch} already exists")
+    # Check if branch already exists locally
+    local_branch_exists = run_command(f"git rev-parse --verify {full_branch}", check=False) is not None
 
-        # Check if branch is already checked out in a worktree
+    # Check if branch is already checked out in a worktree
+    if local_branch_exists:
         worktree_list = run_command("git worktree list --porcelain")
         if worktree_list:
             for line in worktree_list.split('\n'):
@@ -125,20 +153,61 @@ def create(branch_name, prefix, base):
                     print(run_command("git worktree list"))
                     sys.exit(1)
 
-        use_existing = questionary.confirm(
-            "Do you want to create a worktree for the existing branch?",
-            default=True
-        ).ask()
+    # Handle remote branch mode
+    if remote:
+        if local_branch_exists:
+            # Both local and remote exist - check if they differ
+            local_commit = run_command(f"git rev-parse {full_branch}", check=False)
+            remote_commit = run_command(f"git rev-parse origin/{full_branch}", check=False)
 
-        if not use_existing:
-            print("Aborted.")
-            sys.exit(0)
+            if local_commit != remote_commit:
+                print(f"⚠️  Local branch '{full_branch}' exists but differs from origin/{full_branch}")
+                print(f"   Local:  {local_commit[:8] if local_commit else 'unknown'}")
+                print(f"   Remote: {remote_commit[:8] if remote_commit else 'unknown'}")
+                print()
 
-        # Use existing branch (remove -B flag)
-        cmd = f"git worktree add {worktree_dir} {full_branch}"
+                choice = questionary.select(
+                    "Which version do you want to use?",
+                    choices=[
+                        "Use local branch",
+                        "Use remote branch (reset local to match)",
+                        "Abort"
+                    ]
+                ).ask()
+
+                if choice == "Abort":
+                    print("Aborted.")
+                    sys.exit(0)
+                elif choice == "Use remote branch (reset local to match)":
+                    # Reset local to match remote
+                    print(f"Resetting local branch '{full_branch}' to match origin/{full_branch}...")
+                    run_command(f"git branch -f {full_branch} origin/{full_branch}", capture=False)
+                # If "Use local branch", just continue with existing local
+
+            # Create worktree with existing local branch
+            cmd = f"git worktree add {worktree_dir} {full_branch}"
+        else:
+            # No local branch - create it tracking the remote
+            cmd = f"git worktree add -b {full_branch} {worktree_dir} origin/{full_branch}"
     else:
-        # Create new branch based on specified base branch
-        cmd = f"git worktree add -B {full_branch} {worktree_dir} {base}"
+        # Regular mode (non-remote)
+        if local_branch_exists:
+            print(f"⚠️  Branch {full_branch} already exists")
+
+            use_existing = questionary.confirm(
+                "Do you want to create a worktree for the existing branch?",
+                default=True
+            ).ask()
+
+            if not use_existing:
+                print("Aborted.")
+                sys.exit(0)
+
+            # Use existing branch (remove -B flag)
+            cmd = f"git worktree add {worktree_dir} {full_branch}"
+        else:
+            # Create new branch based on specified base branch
+            cmd = f"git worktree add -B {full_branch} {worktree_dir} {base}"
 
     # Create the .worktrees directory if it doesn't exist (at repo root)
     worktrees_dir = os.path.join(git_root, ".worktrees")
@@ -151,8 +220,8 @@ def create(branch_name, prefix, base):
     print(f"✅ Worktree created at {worktree_dir}")
     print(f"   Branch: {full_branch}")
 
-    # Check if gt CLI is available and track the branch
-    if run_command("command -v gt", check=False):
+    # Check if gt CLI is available and track the branch (only for non-remote branches)
+    if not remote and run_command("command -v gt", check=False):
         # Change to worktree directory before running gt track
         os.chdir(worktree_dir)
         # Run gt track with parent set to base branch (default: main)

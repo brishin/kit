@@ -31,8 +31,13 @@ A Python-based CLI tool using Click and Questionary that provides three main sub
 1. **`wt create <branch-name>`** - Creates git worktrees with standardized naming conventions
    - Branch format: `{prefix}/{branch-name}` (default prefix: `bs`)
    - Worktree location: `./.worktrees/{prefix}-{branch-name}`
+   - `--remote/-r` flag: Creates worktree from existing remote branch without prefix
+     - Validates branch exists on origin before creating
+     - Handles conflicts between local and remote branches with interactive prompt
+     - Directory name uses dashes instead of slashes (e.g., `feature/foo` → `.worktrees/feature-foo`)
    - Automatically changes to the new worktree directory after creation
    - Interactive prompt if branch already exists
+   - Integrates with Graphite CLI (`gt`) for branch tracking (non-remote branches only)
 
 2. **`wt cleanup`** - Safely deletes branches and worktrees based on merge status
    - Checks if branch has unique commits vs main
