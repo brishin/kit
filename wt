@@ -40,6 +40,9 @@ def run_command(cmd, capture=True, check=True):
                 text=True,
                 check=check
             )
+            # When check=False, we still need to return None on failure
+            if not check and result.returncode != 0:
+                return None
             return result.stdout.strip()
         else:
             # Redirect subprocess stderr to stdout so it doesn't get captured by shell eval
