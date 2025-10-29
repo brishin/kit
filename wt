@@ -150,6 +150,14 @@ def create(branch_name, prefix, base):
 
     print(f"✅ Worktree created at {worktree_dir}")
     print(f"   Branch: {full_branch}")
+
+    # Check if gt CLI is available and track the branch
+    if run_command("command -v gt", check=False):
+        # Change to worktree directory before running gt track
+        os.chdir(worktree_dir)
+        # Run gt track with parent set to base branch (default: main)
+        run_command(f"gt track --parent {base} --quiet", capture=False, check=False)
+
     print("   Changing directory...")
 
     # Output cd command to fd 3 for shell to eval
