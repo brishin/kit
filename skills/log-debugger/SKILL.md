@@ -7,6 +7,7 @@ allowed-tools:
   - Grep
   - Glob
   - Bash
+  - Task
   - AskUserQuestion
 ---
 
@@ -29,10 +30,7 @@ Detect project type (package.json, pytest.ini, go.mod, Cargo.toml), then use Ask
 - **Autonomous**: State the exact command that will be executed
 
 ### 4. Retrieve & Analyze
-```bash
-<command> 2>&1 | grep DEBUG_K9P2M
-```
-Identify unexpected paths, incorrect state, missing/duplicate calls, timing issues.
+Use Task tool with `subagent_type="general-purpose"` to execute and grep logs, then analyze for unexpected paths, incorrect state, missing/duplicate calls, timing issues.
 
 ### 5. Clean Up
 ```bash
@@ -55,13 +53,11 @@ def calculate_total(items):
     return total
 ```
 
-Detect pytest.ini → Ask user with "Autonomous will run: `pytest tests/test_checkout.py -v 2>&1 | grep DEBUG_K9P2M`" → Run → Analyze: `item.quantity` is `None` → Clean up
+Detect pytest.ini → Ask user (Manual vs Autonomous) → Launch general-purpose subagent to execute and analyze → Identify: `item.quantity` is `None` → Clean up
 
 # Notes
 
-- **AskUserQuestion format**: Include detected command in option descriptions
-  - Manual: "You run the program and provide output. Command: `pytest tests/ -v 2>&1 | grep DEBUG_XYZ`"
-  - Autonomous: "Claude runs and analyzes automatically. Will execute: `pytest tests/test_file.py -v 2>&1 | grep DEBUG_XYZ`"
-- For async/concurrent: include thread/task IDs
-- Complex objects: JSON serialize
-- Project detection: package.json → npm test, pytest.ini → pytest, go.mod → go test, Cargo.toml → cargo test
+- **Retrieval options**: Manual (user runs and provides output) vs Autonomous (subagent executes)
+- **Async/concurrent**: Include thread/task IDs in logs
+- **Complex objects**: JSON serialize
+- **Project detection**: package.json → npm test, pytest.ini → pytest, go.mod → go test, Cargo.toml → cargo test
