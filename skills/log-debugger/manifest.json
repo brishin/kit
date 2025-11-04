@@ -1,0 +1,12 @@
+{
+  "name": "log-debugger",
+  "version": "1.0.0",
+  "description": "Solves tricky bugs through strategic log instrumentation with unique greppable prefixes. Use for debugging complex control flow, race conditions, or state mutations.",
+  "skills": [
+    {
+      "name": "Log-Based Debugger",
+      "path": "SKILL.md",
+      "description": "Solves tricky bugs by strategically placing log statements with unique greppable prefixes, then analyzing program state through captured output. Use when debugging complex control flow, race conditions, state mutations, or issues where traditional debugging is difficult. Supports both manual and autonomous log retrieval."
+    }
+  ]
+}
