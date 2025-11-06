@@ -21,13 +21,15 @@ Graphite treats **branches like commits**. Instead of creating multiple commits 
 | Command | Alias | Purpose |
 |---------|-------|---------|
 | `gt ls` | `gt log short` | View all stacks and branches |
-| `gt c -am "msg"` | `gt create --all --message` | Stage all + create branch + commit |
+| `gt c bs/branch-name -am "msg"` | `gt create --all --message` | Stage all + create branch + commit |
 | `gt ss` | `gt submit --stack` | Submit all PRs in current stack |
 | `gt ss -u` | `gt submit --stack --update-only` | Update existing PRs only (don't create new) |
 | `gt m -a` | `gt modify --all` | Amend current branch with new changes |
 | `gt m -cam "msg"` | `gt modify --all --commit --message` | Add new commit (not amend) |
 | `gt sync -f` | `gt sync --force` | Sync trunk, clean merged branches, restack |
 | `gt undo` | — | Undo last Graphite operation |
+
+**Branch Naming Convention:** Always use `bs/{1-4-words}` pattern (e.g., `bs/activity-feed-viewmodel`)
 
 ## Navigation
 
@@ -57,14 +59,14 @@ Graphite treats **branches like commits**. Instead of creating multiple commits 
 # Start from trunk
 gt co -t
 
-# Make changes, then create first branch
-gt c -am "Add user model"
+# Make changes, then create first branch (follow bs/{1-4-words} naming)
+gt c bs/user-model -am "Add user model"
 
 # Make more changes, create second branch (stacks on first)
-gt c -am "Add user authentication"
+gt c bs/user-auth -am "Add user authentication"
 
 # Make more changes, create third branch
-gt c -am "Add password reset"
+gt c bs/password-reset -am "Add password reset"
 
 # View your stack
 gt ls
@@ -125,10 +127,10 @@ git push
 
 **Graphite:**
 ```bash
-gt c -am "commit 1"  # creates branch-1
-gt c -am "commit 2"  # creates branch-2 on top of branch-1
-gt c -am "commit 3"  # creates branch-3 on top of branch-2
-gt ss                # creates 3 PRs, each reviewable independently
+gt c bs/feature-one -am "commit 1"    # creates bs/feature-one
+gt c bs/feature-two -am "commit 2"    # creates bs/feature-two on top of bs/feature-one
+gt c bs/feature-three -am "commit 3"  # creates bs/feature-three on top of bs/feature-two
+gt ss                                 # creates 3 PRs, each reviewable independently
 ```
 
 ## Restacking
@@ -154,14 +156,14 @@ Graphite is optimized for trunk-based development:
 # 1. Start from trunk
 gt co -t
 
-# 2. Create database layer
-gt c -am "Add user table migration"
+# 2. Create database layer (follow bs/{1-4-words} naming)
+gt c bs/user-migration -am "Add user table migration"
 
 # 3. Create backend layer (depends on #2)
-gt c -am "Add user CRUD endpoints"
+gt c bs/user-endpoints -am "Add user CRUD endpoints"
 
 # 4. Create frontend layer (depends on #3)
-gt c -am "Add user management UI"
+gt c bs/user-ui -am "Add user management UI"
 
 # 5. Submit all 3 PRs (as drafts)
 gt ss
@@ -291,7 +293,9 @@ Choose the right approach for your change:
 
 ## Naming & Organization
 
-- Let Graphite auto-name branches, or configure a prefix in settings
+- **Always use explicit branch names** following the `bs/{1-4-words}` pattern
+  - Example: `gt c bs/activity-feed-viewmodel -am "Add view model"`
+  - Keep branch names concise (1-4 words) and descriptive
 - Use descriptive commit messages (they become PR titles)
 - View stack before submitting: `gt ls`
 
