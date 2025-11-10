@@ -1,0 +1,896 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "gql[requests]>=3.5.0",
+#   "click",
+#   "questionary",
+#   "python-dotenv",
+# ]
+# ///
+"""
+GitHub CLI - Generate team progress reports from GitHub PRs with Linear context.
+
+Powered by GitHub GraphQL API and Linear GraphQL API.
+
+Usage:
+  github pr list --team <TEAM_KEY> [--repo owner/name] [--cycle <CYCLE_ID>]
+  github pr view <pr-number> [--repo owner/name]
+  github report cycle --team <TEAM_KEY> [--repo owner/name] [--cycle <CYCLE_ID>]
+
+Setup:
+  1. Authenticate with GitHub CLI: gh auth login
+  2. Add Linear API key to ~/.env.local: LINEAR_API_KEY="lin_api_..."
+     (or set environment variable: export LINEAR_API_KEY="lin_api_...")
+"""
+
+import sys
+import os
+import re
+import subprocess
+from pathlib import Path
+from typing import TypedDict, Optional, List, Any, NotRequired
+from datetime import datetime
+
+import click
+import questionary
+from dotenv import load_dotenv
+from gql import Client, gql as gql_query
+from gql.transport.requests import RequestsHTTPTransport
+from gql.transport.exceptions import TransportQueryError
+
+# Load environment variables from ~/.env.local
+load_dotenv(dotenv_path=Path.home() / ".env.local")
+
+
+# ============================================================================
+# Type Definitions
+# ============================================================================
+
+class UserData(TypedDict):
+    login: str
+    name: NotRequired[str]
+
+
+class LabelData(TypedDict):
+    name: str
+
+
+class LinearIssueRef(TypedDict):
+    """Reference to a Linear issue"""
+    identifier: str  # e.g., "FLA-123"
+    title: str
+    url: str
+    parent: NotRequired["LinearIssueRef"]
+
+
+class LabelsConnection(TypedDict):
+    nodes: List[LabelData]
+
+
+class PRData(TypedDict):
+    number: int
+    title: str
+    state: str  # OPEN, CLOSED, MERGED
+    merged: bool
+    mergedAt: NotRequired[str]
+    createdAt: str
+    author: UserData
+    labels: LabelsConnection
+    url: str
+    additions: int
+    deletions: int
+    changedFiles: int
+    body: NotRequired[str]
+    linearIssues: NotRequired[List[LinearIssueRef]]  # Enriched data
+
+
+class LinearCycleData(TypedDict):
+    """Linear cycle data from Linear API"""
+    id: str
+    name: str
+    number: int
+    startsAt: str
+    endsAt: str
+    isActive: bool
+    team: dict[str, str]
+
+
+class GitHubRepoInfo(TypedDict):
+    owner: str
+    name: str
+
+
+# ============================================================================
+# GitHub API Client
+# ============================================================================
+
+def get_github_token() -> str:
+    """Get GitHub token from environment or gh CLI."""
+    # Try environment variable first
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+
+    # Try gh CLI
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    click.echo("Error: GitHub authentication not found", err=True)
+    click.echo("\nTo authenticate:", err=True)
+    click.echo("  1. Run: gh auth login", err=True)
+    click.echo("  2. Or set environment variable: export GITHUB_TOKEN='ghp_...'", err=True)
+    sys.exit(1)
+
+
+_github_client_cache: Optional[Client] = None
+
+
+def get_github_client() -> Client:
+    """Get or create GitHub GraphQL client connection."""
+    global _github_client_cache
+
+    if _github_client_cache is not None:
+        return _github_client_cache
+
+    token = get_github_token()
+
+    transport = RequestsHTTPTransport(
+        url="https://api.github.com/graphql",
+        headers={"Authorization": f"Bearer {token}"},
+        verify=True,
+        retries=3,
+    )
+
+    _github_client_cache = Client(transport=transport, fetch_schema_from_transport=False)
+    return _github_client_cache
+
+
+# ============================================================================
+# Linear API Client
+# ============================================================================
+
+_linear_client_cache: Optional[Client] = None
+
+
+def get_linear_client() -> Client:
+    """Get or create Linear GraphQL client connection."""
+    global _linear_client_cache
+
+    if _linear_client_cache is not None:
+        return _linear_client_cache
+
+    api_key = os.environ.get("LINEAR_API_KEY")
+    if not api_key:
+        click.echo("Error: LINEAR_API_KEY not found", err=True)
+        click.echo("\nTo get an API key:", err=True)
+        click.echo("  1. Go to https://linear.app/settings/api", err=True)
+        click.echo("  2. Create a new Personal API Key", err=True)
+        click.echo("  3. Add to ~/.env.local: LINEAR_API_KEY='lin_api_...'", err=True)
+        sys.exit(1)
+
+    transport = RequestsHTTPTransport(
+        url="https://api.linear.app/graphql",
+        headers={"Authorization": api_key},
+        verify=True,
+        retries=3,
+    )
+
+    _linear_client_cache = Client(transport=transport, fetch_schema_from_transport=False)
+    return _linear_client_cache
+
+
+# ============================================================================
+# GraphQL Queries
+# ============================================================================
+
+# GitHub queries
+GET_REPO_INFO_QUERY = gql_query("""
+query {
+  repository(owner: $owner, name: $name) {
+    id
+    name
+    owner {
+      login
+    }
+  }
+}
+""")
+
+LIST_PRS_QUERY = gql_query("""
+query ListPRs($owner: String!, $name: String!, $first: Int!, $states: [PullRequestState!], $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $first, states: $states, orderBy: {field: UPDATED_AT, direction: DESC}, after: $after) {
+      nodes {
+        number
+        title
+        state
+        merged
+        mergedAt
+        createdAt
+        url
+        additions
+        deletions
+        changedFiles
+        author {
+          login
+          ... on User {
+            name
+          }
+        }
+        labels(first: 20) {
+          nodes {
+            name
+          }
+        }
+        body
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+""")
+
+GET_PR_QUERY = gql_query("""
+query GetPR($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      title
+      state
+      merged
+      mergedAt
+      createdAt
+      url
+      additions
+      deletions
+      changedFiles
+      author {
+        login
+        ... on User {
+          name
+        }
+      }
+      labels(first: 20) {
+        nodes {
+          name
+        }
+      }
+      body
+      files(first: 100) {
+        nodes {
+          path
+        }
+      }
+    }
+  }
+}
+""")
+
+# Linear queries
+GET_ACTIVE_CYCLE_QUERY = gql_query("""
+query GetActiveCycle($teamId: String!) {
+  team(id: $teamId) {
+    id
+    name
+    key
+    activeCycle {
+      id
+      name
+      number
+      startsAt
+      endsAt
+      isActive
+    }
+  }
+}
+""")
+
+LIST_TEAMS_QUERY = gql_query("""
+query ListTeams {
+  teams {
+    nodes {
+      id
+      name
+      key
+    }
+  }
+}
+""")
+
+GET_ISSUE_BY_IDENTIFIER_QUERY = gql_query("""
+query GetIssueByIdentifier($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    url
+    parent {
+      id
+      identifier
+      title
+      url
+    }
+  }
+}
+""")
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def get_repo_info(repo: Optional[str] = None) -> GitHubRepoInfo:
+    """
+    Get repository owner and name.
+
+    Args:
+        repo: Optional repo in "owner/name" format. If not provided, auto-detect from git remote.
+
+    Returns:
+        GitHubRepoInfo with owner and name
+    """
+    # If repo specified, parse it
+    if repo:
+        parts = repo.split("/")
+        if len(parts) != 2:
+            click.echo(f"Error: Invalid repo format '{repo}'. Expected 'owner/name'", err=True)
+            sys.exit(1)
+        return {"owner": parts[0], "name": parts[1]}
+
+    # Otherwise, auto-detect from git remote
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        if result.returncode != 0:
+            click.echo("Error: Not in a git repository and --repo not specified", err=True)
+            sys.exit(1)
+
+        remote_url = result.stdout.strip()
+
+        # Parse GitHub URL (supports both HTTPS and SSH formats)
+        # HTTPS: https://github.com/owner/repo.git
+        # SSH: git@github.com:owner/repo.git
+        match = re.match(r'(?:https://github\.com/|git@github\.com:)([^/]+)/(.+?)(?:\.git)?$', remote_url)
+
+        if not match:
+            click.echo(f"Error: Could not parse GitHub repository from remote: {remote_url}", err=True)
+            sys.exit(1)
+
+        owner, name = match.groups()
+        return {"owner": owner, "name": name}
+
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+        click.echo(f"Error: Failed to get git remote: {e}", err=True)
+        sys.exit(1)
+
+
+def extract_linear_issue_ids(text: Optional[str]) -> List[str]:
+    """
+    Extract Linear issue IDs from PR body/title.
+    Looks for patterns like FLA-123, ENG-456, etc.
+    """
+    if not text:
+        return []
+
+    # Match Linear issue identifiers (TEAM-NUMBER format)
+    pattern = r'\b([A-Z]{2,10}-\d+)\b'
+    matches = re.findall(pattern, text)
+    return list(set(matches))  # Deduplicate
+
+
+def resolve_team_id(client: Client, team_key: str) -> str:
+    """Resolve a team key (e.g., 'FLA') to a team UUID."""
+    result = client.execute(LIST_TEAMS_QUERY)
+    teams = result.get("teams", {}).get("nodes", [])
+
+    for team in teams:
+        if team.get("key", "").upper() == team_key.upper():
+            return str(team["id"])
+
+    raise ValueError(f"Could not find team with key: {team_key}")
+
+
+def get_active_cycle(linear_client: Client, team_id: str) -> Optional[LinearCycleData]:
+    """Get the active cycle for a team."""
+    result = linear_client.execute(GET_ACTIVE_CYCLE_QUERY, variable_values={"teamId": team_id})
+    team = result.get("team", {})
+    active_cycle = team.get("activeCycle")
+
+    if not active_cycle:
+        return None
+
+    # Add team info to cycle data
+    active_cycle["team"] = {
+        "id": team["id"],
+        "name": team["name"],
+        "key": team["key"],
+    }
+
+    return active_cycle  # type: ignore
+
+
+def enrich_pr_with_linear_data(pr: PRData, linear_client: Client) -> PRData:
+    """
+    Enrich PR data with Linear issue information.
+    Extracts Linear issue IDs from PR body/title and fetches issue details.
+    """
+    # Extract Linear issue IDs from PR body and title
+    text = f"{pr.get('title', '')} {pr.get('body', '')}"
+    issue_ids = extract_linear_issue_ids(text)
+
+    if not issue_ids:
+        return pr
+
+    # Fetch Linear issue details
+    linear_issues: List[LinearIssueRef] = []
+
+    for issue_id in issue_ids:
+        try:
+            result = linear_client.execute(
+                GET_ISSUE_BY_IDENTIFIER_QUERY,
+                variable_values={"id": issue_id}
+            )
+            issue_data = result.get("issue")
+
+            if issue_data:
+                linear_issue: LinearIssueRef = {
+                    "identifier": issue_data["identifier"],
+                    "title": issue_data["title"],
+                    "url": issue_data["url"],
+                }
+
+                # Add parent if exists
+                parent_data = issue_data.get("parent")
+                if parent_data:
+                    linear_issue["parent"] = {
+                        "identifier": parent_data["identifier"],
+                        "title": parent_data["title"],
+                        "url": parent_data["url"],
+                    }
+
+                linear_issues.append(linear_issue)
+
+        except Exception:
+            # Skip issues that can't be fetched
+            continue
+
+    pr["linearIssues"] = linear_issues
+    return pr
+
+
+def filter_prs_by_cycle(prs: List[PRData], cycle: LinearCycleData) -> List[PRData]:
+    """Filter PRs that were merged during the cycle period."""
+    start_time = datetime.fromisoformat(cycle["startsAt"].replace("Z", "+00:00"))
+    end_time = datetime.fromisoformat(cycle["endsAt"].replace("Z", "+00:00"))
+
+    filtered = []
+    for pr in prs:
+        if not pr.get("merged") or not pr.get("mergedAt"):
+            continue
+
+        merged_at = datetime.fromisoformat(pr["mergedAt"].replace("Z", "+00:00"))
+
+        if start_time <= merged_at <= end_time:
+            filtered.append(pr)
+
+    return filtered
+
+
+def format_pr_compact(pr: PRData) -> str:
+    """Format PR in compact one-line view."""
+    number = pr["number"]
+    title = pr["title"]
+    author = pr["author"]["login"]
+    merged_at = pr.get("mergedAt", "")
+
+    # Truncate title
+    max_title_len = 60
+    title_display = title[:max_title_len] + "..." if len(title) > max_title_len else title
+
+    # Format date
+    date_str = ""
+    if merged_at:
+        try:
+            dt = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+            date_str = dt.strftime("%Y-%m-%d")
+        except:
+            date_str = merged_at[:10]
+
+    # Build output
+    parts = [
+        f"#{number}",
+        f"[{author}]",
+        f"[{date_str}]" if date_str else "[not merged]",
+        title_display,
+    ]
+
+    # Add Linear issue references if available
+    linear_issues = pr.get("linearIssues", [])
+    if linear_issues:
+        issue_ids = ", ".join(issue["identifier"] for issue in linear_issues)
+        parts.append(f"| Linear: {issue_ids}")
+
+    return " ".join(parts)
+
+
+def format_pr_detailed(pr: PRData) -> str:
+    """Format PR with detailed information."""
+    number = pr["number"]
+    title = pr["title"]
+    url = pr["url"]
+    author = pr["author"]["login"]
+    author_name = pr["author"].get("name", author)
+    merged_at = pr.get("mergedAt", "Not merged")
+    additions = pr.get("additions", 0)
+    deletions = pr.get("deletions", 0)
+    changed_files = pr.get("changedFiles", 0)
+
+    output = []
+    output.append(f"\nPR #{number}: {title}")
+    output.append("=" * 80)
+    output.append(f"URL: {url}")
+    output.append(f"Author: {author_name} (@{author})")
+    output.append(f"Merged: {merged_at}")
+    output.append(f"Changes: +{additions} -{deletions} ({changed_files} files)")
+
+    # Show Linear issues
+    linear_issues = pr.get("linearIssues", [])
+    if linear_issues:
+        output.append("\nLinear Issues:")
+        for issue in linear_issues:
+            output.append(f"  - [{issue['identifier']}] {issue['title']}")
+            output.append(f"    {issue['url']}")
+
+            # Show parent (epic) if exists
+            parent = issue.get("parent")
+            if parent:
+                output.append(f"    Epic: [{parent['identifier']}] {parent['title']}")
+
+    # Show labels
+    labels_data = pr.get("labels", {})
+    labels = labels_data.get("nodes", []) if isinstance(labels_data, dict) else []
+    if labels:
+        label_names = [label["name"] for label in labels]
+        output.append(f"\nLabels: {', '.join(label_names)}")
+
+    output.append("=" * 80)
+
+    return "\n".join(output)
+
+
+def generate_cycle_report_markdown(
+    cycle: LinearCycleData,
+    prs: List[PRData],
+    repo_info: GitHubRepoInfo
+) -> str:
+    """
+    Generate a markdown report for PRs in a cycle, grouped by Linear epic.
+    """
+    # Parse dates
+    try:
+        start_date = datetime.fromisoformat(cycle["startsAt"].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        end_date = datetime.fromisoformat(cycle["endsAt"].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except:
+        start_date = cycle["startsAt"]
+        end_date = cycle["endsAt"]
+
+    team = cycle.get("team", {})
+    team_name = team.get("name", "Unknown Team")
+    cycle_name = cycle.get("name", "Unknown Cycle")
+
+    # Group PRs by epic
+    prs_by_epic: dict[str, List[PRData]] = {}
+    unlinked_prs: List[PRData] = []
+
+    for pr in prs:
+        linear_issues = pr.get("linearIssues", [])
+
+        if not linear_issues:
+            unlinked_prs.append(pr)
+            continue
+
+        # Use the first Linear issue's epic as the grouping key
+        issue = linear_issues[0]
+        parent = issue.get("parent")
+
+        if parent:
+            epic_key = f"[{parent['identifier']}] {parent['title']}"
+            epic_url = parent.get("url", "")
+            if epic_url:
+                epic_key = f"[{parent['identifier']} - {parent['title']}]({epic_url})"
+        else:
+            epic_key = "No Epic"
+
+        if epic_key not in prs_by_epic:
+            prs_by_epic[epic_key] = []
+
+        prs_by_epic[epic_key].append(pr)
+
+    # Build markdown
+    lines = [
+        f"# Team Progress Report: {cycle_name}",
+        f"**Team:** {team_name} | **Period:** {start_date} to {end_date}",
+        f"**Repository:** {repo_info['owner']}/{repo_info['name']}",
+        "",
+        f"**Total PRs Merged:** {len(prs)}",
+        "",
+        "## Shipped Work by Product Area",
+        "",
+    ]
+
+    # Sort epics by number of PRs (descending)
+    sorted_epics = sorted(prs_by_epic.items(), key=lambda x: len(x[1]), reverse=True)
+
+    for epic_key, epic_prs in sorted_epics:
+        lines.append(f"### {epic_key}")
+        lines.append("")
+
+        # Sort PRs by merged date (most recent first)
+        epic_prs_sorted = sorted(
+            epic_prs,
+            key=lambda p: p.get("mergedAt", ""),
+            reverse=True
+        )
+
+        for pr in epic_prs_sorted:
+            number = pr["number"]
+            title = pr["title"]
+            url = pr["url"]
+            author = pr["author"]["login"]
+            additions = pr.get("additions", 0)
+            deletions = pr.get("deletions", 0)
+
+            lines.append(f"- **[#{number}]({url})** {title}")
+            lines.append(f"  - Author: @{author} | Changes: +{additions} -{deletions}")
+
+            # Show all linked Linear issues
+            linear_issues = pr.get("linearIssues", [])
+            if linear_issues:
+                issue_links = ", ".join(
+                    f"[{issue['identifier']}]({issue['url']})"
+                    for issue in linear_issues
+                )
+                lines.append(f"  - Linear: {issue_links}")
+
+            lines.append("")
+
+    # Show unlinked PRs separately
+    if unlinked_prs:
+        lines.append("### Other Changes (Not Linked to Linear)")
+        lines.append("")
+
+        for pr in sorted(unlinked_prs, key=lambda p: p.get("mergedAt", ""), reverse=True):
+            number = pr["number"]
+            title = pr["title"]
+            url = pr["url"]
+            author = pr["author"]["login"]
+
+            lines.append(f"- **[#{number}]({url})** {title} (@{author})")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ============================================================================
+# CLI Commands
+# ============================================================================
+
+@click.group()
+def cli() -> None:
+    """GitHub CLI - Generate team progress reports from GitHub PRs."""
+    pass
+
+
+@cli.group()
+def pr() -> None:
+    """Manage GitHub pull requests."""
+    pass
+
+
+@cli.group()
+def report() -> None:
+    """Generate progress reports."""
+    pass
+
+
+@pr.command("list")
+@click.option("--team", required=True, help="Linear team key (e.g., FLA, ENG)")
+@click.option("--cycle", "cycle_id", help="Linear cycle ID (defaults to active cycle)")
+@click.option("--limit", type=int, default=100, help="Maximum number of PRs to fetch (default: 100)")
+@click.option("--repo", help="GitHub repository in 'owner/name' format (auto-detects from git remote if not specified)")
+def pr_list(team: str, cycle_id: Optional[str], limit: int, repo: Optional[str]) -> None:
+    """List merged PRs for a Linear cycle."""
+    try:
+        github_client = get_github_client()
+        linear_client = get_linear_client()
+        repo_info = get_repo_info(repo)
+
+        # Resolve team and get cycle
+        team_id = resolve_team_id(linear_client, team)
+
+        if cycle_id:
+            # Fetch specific cycle (not implemented yet - would need query)
+            click.echo(f"Error: Custom cycle ID not yet supported", err=True)
+            sys.exit(1)
+        else:
+            cycle = get_active_cycle(linear_client, team_id)
+            if not cycle:
+                click.echo(f"Error: No active cycle found for team {team}", err=True)
+                sys.exit(1)
+
+        click.echo(f"Fetching PRs for cycle: {cycle['name']} ({cycle['startsAt'][:10]} to {cycle['endsAt'][:10]})")
+
+        # Fetch merged PRs
+        variables = {
+            "owner": repo_info["owner"],
+            "name": repo_info["name"],
+            "first": limit,
+            "states": ["MERGED"],
+            "after": None,
+        }
+
+        result = github_client.execute(LIST_PRS_QUERY, variable_values=variables)
+        prs: List[PRData] = result["repository"]["pullRequests"]["nodes"]
+
+        # Filter by cycle dates
+        filtered_prs = filter_prs_by_cycle(prs, cycle)
+
+        if not filtered_prs:
+            click.echo(f"No PRs found in cycle {cycle['name']}")
+            return
+
+        # Enrich with Linear data
+        click.echo(f"Enriching {len(filtered_prs)} PRs with Linear data...")
+        enriched_prs = [enrich_pr_with_linear_data(pr, linear_client) for pr in filtered_prs]
+
+        # Display
+        click.echo()
+        for pr in enriched_prs:
+            click.echo(format_pr_compact(pr))
+
+        click.echo(f"\nShowing {len(enriched_prs)} PR(s) in cycle {cycle['name']}")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@pr.command("view")
+@click.argument("pr_number", type=int)
+@click.option("--repo", help="GitHub repository in 'owner/name' format (auto-detects from git remote if not specified)")
+def pr_view(pr_number: int, repo: Optional[str]) -> None:
+    """View detailed information about a specific PR."""
+    try:
+        github_client = get_github_client()
+        linear_client = get_linear_client()
+        repo_info = get_repo_info(repo)
+
+        # Fetch PR
+        variables = {
+            "owner": repo_info["owner"],
+            "name": repo_info["name"],
+            "number": pr_number,
+        }
+
+        result = github_client.execute(GET_PR_QUERY, variable_values=variables)
+        pr: Optional[PRData] = result["repository"]["pullRequest"]
+
+        if not pr:
+            click.echo(f"Error: PR #{pr_number} not found", err=True)
+            sys.exit(1)
+
+        # Enrich with Linear data
+        enriched_pr = enrich_pr_with_linear_data(pr, linear_client)
+
+        # Display
+        click.echo(format_pr_detailed(enriched_pr))
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@report.command("cycle")
+@click.option("--team", required=True, help="Linear team key (e.g., FLA, ENG)")
+@click.option("--cycle", "cycle_id", help="Linear cycle ID (defaults to active cycle)")
+@click.option("--limit", type=int, default=100, help="Maximum number of PRs to fetch (default: 100, max: 100)")
+@click.option("--repo", help="GitHub repository in 'owner/name' format (auto-detects from git remote if not specified)")
+def report_cycle(team: str, cycle_id: Optional[str], limit: int, repo: Optional[str]) -> None:
+    """
+    Generate a markdown progress report for a Linear cycle based on GitHub PRs.
+
+    Groups PRs by Linear epic to highlight important product goals.
+
+    Examples:
+        github report cycle --team FLA --repo flashback2025/flashback
+        github report cycle --team ENG --limit 100
+    """
+    try:
+        # Validate limit
+        if limit > 100:
+            click.echo("Error: GitHub API limits pagination to 100 records. Use --limit 100 or less.", err=True)
+            sys.exit(1)
+
+        github_client = get_github_client()
+        linear_client = get_linear_client()
+        repo_info = get_repo_info(repo)
+
+        # Resolve team and get cycle
+        team_id = resolve_team_id(linear_client, team)
+
+        if cycle_id:
+            # Fetch specific cycle (not implemented yet)
+            click.echo(f"Error: Custom cycle ID not yet supported", err=True)
+            sys.exit(1)
+        else:
+            cycle = get_active_cycle(linear_client, team_id)
+            if not cycle:
+                click.echo(f"Error: No active cycle found for team {team}", err=True)
+                sys.exit(1)
+
+        click.echo(f"Generating report for cycle: {cycle['name']}", err=True)
+        click.echo(f"Period: {cycle['startsAt'][:10]} to {cycle['endsAt'][:10]}", err=True)
+
+        # Fetch merged PRs
+        variables = {
+            "owner": repo_info["owner"],
+            "name": repo_info["name"],
+            "first": limit,
+            "states": ["MERGED"],
+            "after": None,
+        }
+
+        result = github_client.execute(LIST_PRS_QUERY, variable_values=variables)
+        prs: List[PRData] = result["repository"]["pullRequests"]["nodes"]
+
+        # Filter by cycle dates
+        filtered_prs = filter_prs_by_cycle(prs, cycle)
+
+        if not filtered_prs:
+            click.echo(f"No PRs found in cycle {cycle['name']}", err=True)
+            sys.exit(0)
+
+        click.echo(f"Found {len(filtered_prs)} merged PRs in cycle", err=True)
+        click.echo(f"Enriching with Linear data...", err=True)
+
+        # Enrich with Linear data
+        enriched_prs = [enrich_pr_with_linear_data(pr, linear_client) for pr in filtered_prs]
+
+        # Generate report
+        markdown = generate_cycle_report_markdown(cycle, enriched_prs, repo_info)
+
+        # Output to stdout
+        click.echo(markdown)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()

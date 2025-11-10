@@ -20,6 +20,7 @@ Usage:
   linear issue update <issue-id> [--status STATUS] [--assignee USER] [--title TITLE]
   linear comment list <issue-id>
   linear comment create <issue-id> [--message MESSAGE]
+  linear report cycle --team <TEAM_KEY> [--group-by priority|epic|assignee] [--cycle <CYCLE_ID>] [--include-in-progress]
 
 Setup:
   1. Generate a Personal API Key at: https://linear.app/settings/api
@@ -90,6 +91,13 @@ class ChildrenConnection(TypedDict):
     nodes: List[IssueRef]
 
 
+class CycleRef(TypedDict):
+    """Minimal cycle reference"""
+    id: str
+    name: str
+    number: NotRequired[int]
+
+
 class IssueData(TypedDict):
     id: str
     identifier: str
@@ -102,6 +110,8 @@ class IssueData(TypedDict):
     branchName: NotRequired[str]
     createdAt: str
     updatedAt: str
+    completedAt: NotRequired[str]  # When the issue was completed
+    estimate: NotRequired[float]  # Story points
     assignee: NotRequired[UserData]
     creator: NotRequired[UserData]
     project: NotRequired[dict[str, str]]
@@ -109,6 +119,7 @@ class IssueData(TypedDict):
     parent: NotRequired[IssueRef]
     children: NotRequired[ChildrenConnection]
     attachments: NotRequired[AttachmentsConnection]
+    cycle: NotRequired[CycleRef]
 
 
 class CommentData(TypedDict):
@@ -122,6 +133,28 @@ class TeamData(TypedDict):
     id: str
     name: str
     key: str
+
+
+class IssuesConnection(TypedDict):
+    """Connection type for issues with pagination support"""
+    nodes: List[IssueData]
+    pageInfo: NotRequired[dict[str, Any]]
+
+
+class CycleData(TypedDict):
+    """Full cycle data with progress metrics"""
+    id: str
+    name: str
+    number: int
+    startsAt: str
+    endsAt: str
+    isActive: bool
+    progress: NotRequired[float]  # 0.0 to 1.0
+    scopeHistory: NotRequired[List[float]]
+    completedScopeHistory: NotRequired[List[float]]
+    issueCountHistory: NotRequired[List[float]]
+    issues: NotRequired[IssuesConnection]
+    team: NotRequired[TeamData]
 
 
 # ============================================================================
@@ -321,6 +354,124 @@ query ListTeams {
       id
       name
       key
+    }
+  }
+}
+""")
+
+GET_ACTIVE_CYCLE_QUERY = gql_query("""
+query GetActiveCycle($teamId: String!) {
+  team(id: $teamId) {
+    id
+    name
+    key
+    activeCycle {
+      id
+      name
+      number
+      startsAt
+      endsAt
+      isActive
+      progress
+    }
+  }
+}
+""")
+
+GET_CYCLE_WITH_ISSUES_QUERY = gql_query("""
+query GetCycleWithIssues($cycleId: String!, $filter: IssueFilter) {
+  cycle(id: $cycleId) {
+    id
+    name
+    number
+    startsAt
+    endsAt
+    isActive
+    progress
+    team {
+      id
+      name
+      key
+    }
+    issues(first: 250, filter: $filter) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        priorityLabel
+        status: state {
+          id
+          name
+          type
+        }
+        completedAt
+        estimate
+        url
+        assignee {
+          id
+          name
+        }
+        parent {
+          id
+          identifier
+          title
+        }
+        attachments {
+          nodes {
+            id
+            title
+            subtitle
+            url
+          }
+        }
+      }
+    }
+  }
+}
+""")
+
+LIST_ISSUES_WITH_FILTER_QUERY = gql_query("""
+query ListIssuesWithFilter($first: Int!, $filter: IssueFilter) {
+  issues(first: $first, orderBy: updatedAt, filter: $filter) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      priority
+      priorityLabel
+      status: state {
+        id
+        name
+        type
+      }
+      completedAt
+      estimate
+      url
+      assignee {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+        title
+      }
+      cycle {
+        id
+        name
+        number
+      }
+      attachments {
+        nodes {
+          id
+          title
+          subtitle
+          url
+        }
+      }
     }
   }
 }
@@ -704,6 +855,482 @@ def format_comment(comment_data: CommentData) -> str:
     return f"\n[{author_name}] {created_at}\n{body}\n{'-' * 40}"
 
 
+def resolve_team_id(client: Client, team_key: str) -> str:
+    """
+    Resolve a team key (e.g., 'FLA') to a team UUID.
+
+    Args:
+        client: GraphQL client
+        team_key: Team key (e.g., 'FLA', 'ENG')
+
+    Returns:
+        Team UUID
+
+    Raises:
+        ValueError: If team not found
+    """
+    result = client.execute(LIST_TEAMS_QUERY)
+    teams = result.get("teams", {}).get("nodes", [])
+
+    for team in teams:
+        if team.get("key", "").upper() == team_key.upper():
+            return str(team["id"])
+
+    raise ValueError(f"Could not find team with key: {team_key}")
+
+
+def get_active_cycle(client: Client, team_id: str) -> Optional[CycleData]:
+    """
+    Get the active cycle for a team.
+
+    Args:
+        client: GraphQL client
+        team_id: Team UUID
+
+    Returns:
+        CycleData or None if no active cycle
+    """
+    result = client.execute(GET_ACTIVE_CYCLE_QUERY, variable_values={"teamId": team_id})
+    team = result.get("team", {})
+    active_cycle = team.get("activeCycle")
+
+    if not active_cycle:
+        return None
+
+    # Add team info to cycle data
+    active_cycle["team"] = {
+        "id": team["id"],
+        "name": team["name"],
+        "key": team["key"],
+    }
+
+    return active_cycle  # type: ignore
+
+
+def format_issue_for_report(issue: IssueData, show_assignee: bool = True) -> List[str]:
+    """
+    Format a single issue for inclusion in a report.
+
+    Args:
+        issue: Issue data
+        show_assignee: Whether to show assignee information
+
+    Returns:
+        List of markdown lines for this issue
+    """
+    lines = []
+
+    # Extract issue details
+    identifier = issue.get("identifier", "???")
+    title = issue.get("title", "Untitled")
+    url = issue.get("url", "")
+    assignee_data = issue.get("assignee")
+    assignee = assignee_data.get("name", "Unassigned") if assignee_data else "Unassigned"
+    description = issue.get("description", "")
+
+    # Get first line of description for context
+    context = ""
+    if description:
+        first_line = description.split("\n")[0].strip()
+        if first_line and len(first_line) > 10:
+            context = f" - {first_line[:100]}"
+            if len(first_line) > 100:
+                context += "..."
+
+    # Main issue line
+    lines.append(f"- **[{identifier}]({url})** {title}{context}")
+
+    # Show assignee if requested
+    if show_assignee and assignee != "Unassigned":
+        lines.append(f"  - Owner: @{assignee}")
+
+    # Show PRs if any
+    attachments_data = issue.get("attachments")
+    attachments = attachments_data.get("nodes", []) if attachments_data else []
+    pr_urls = [att["url"] for att in attachments if "github.com" in att.get("url", "")]
+    if pr_urls:
+        pr_links = ", ".join(f"[#{url.split('/')[-1]}]({url})" for url in pr_urls)
+        lines.append(f"  - PRs: {pr_links}")
+
+    lines.append("")
+    return lines
+
+
+def generate_cycle_report_markdown(cycle: CycleData, issues: List[IssueData]) -> str:
+    """
+    Generate a markdown report for a cycle focusing on key deliverables.
+
+    Args:
+        cycle: Cycle data
+        issues: List of completed issues in the cycle
+
+    Returns:
+        Markdown formatted report
+    """
+    from datetime import datetime
+
+    # Parse dates
+    starts_at = cycle.get("startsAt", "")
+    ends_at = cycle.get("endsAt", "")
+
+    try:
+        start_date = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        end_date = datetime.fromisoformat(ends_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except:
+        start_date = starts_at
+        end_date = ends_at
+
+    team = cycle.get("team", {})
+    team_name = team.get("name", "Unknown Team")
+    cycle_name = cycle.get("name") or f"Cycle {cycle.get('number', 'Unknown')}"
+    cycle_number = cycle.get("number", "")
+
+    # Group issues by priority
+    high_priority = [i for i in issues if i.get("priority", 0) in [1, 2]]  # Urgent, High
+    medium_priority = [i for i in issues if i.get("priority", 0) == 3]
+    low_priority = [i for i in issues if i.get("priority", 0) in [0, 4]]  # No priority, Low
+
+    # Sort by parent issue to group related work
+    def sort_key(issue: IssueData) -> tuple[str, str]:
+        parent = issue.get("parent", {})
+        parent_title = parent.get("title", "") if parent else ""
+        return (parent_title, issue.get("identifier", ""))
+
+    high_priority.sort(key=sort_key)
+    medium_priority.sort(key=sort_key)
+    low_priority.sort(key=sort_key)
+
+    # Build markdown
+    lines = [
+        f"# Cycle Progress Report: {cycle_name}",
+        f"**Team:** {team_name} | **Period:** {start_date} to {end_date}",
+        "",
+        "## Key Deliverables",
+        "",
+    ]
+
+    def format_issue_group(priority_issues: List[IssueData], title: str) -> None:
+        if not priority_issues:
+            return
+
+        lines.append(f"### {title}")
+        lines.append("")
+
+        current_parent = None
+        for issue in priority_issues:
+            parent = issue.get("parent")
+            parent_title = parent.get("title") if parent else None
+
+            # Show parent context if it changed
+            if parent_title and parent_title != current_parent:
+                lines.append(f"**Epic: {parent_title}**")
+                lines.append("")
+                current_parent = parent_title
+            elif not parent_title and current_parent is not None:
+                current_parent = None
+
+            # Format issue using helper
+            issue_lines = format_issue_for_report(issue, show_assignee=True)
+            lines.extend(issue_lines)
+
+    format_issue_group(high_priority, "High Priority")
+    format_issue_group(medium_priority, "Medium Priority")
+    format_issue_group(low_priority, "Low Priority")
+
+    # Summary
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- **{len(issues)} issues completed**")
+    lines.append(f"  - {len(high_priority)} high priority")
+    lines.append(f"  - {len(medium_priority)} medium priority")
+    lines.append(f"  - {len(low_priority)} low priority")
+
+    # List major projects/epics
+    parent_titles = set()
+    for issue in issues:
+        parent = issue.get("parent")
+        if parent and parent.get("title"):
+            parent_titles.add(parent["title"])
+
+    if parent_titles:
+        lines.append("")
+        lines.append("**Major projects:**")
+        for parent_title in sorted(parent_titles):
+            lines.append(f"- {parent_title}")
+
+    return "\n".join(lines)
+
+
+def generate_epic_report_markdown(cycle: CycleData, issues: List[IssueData]) -> str:
+    """
+    Generate a markdown report grouped by epic/parent issue.
+
+    Args:
+        cycle: Cycle data
+        issues: List of issues in the cycle
+
+    Returns:
+        Markdown formatted report
+    """
+    from datetime import datetime
+    from collections import defaultdict
+
+    # Parse dates
+    starts_at = cycle.get("startsAt", "")
+    ends_at = cycle.get("endsAt", "")
+
+    try:
+        start_date = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        end_date = datetime.fromisoformat(ends_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except:
+        start_date = starts_at
+        end_date = ends_at
+
+    team = cycle.get("team", {})
+    team_name = team.get("name", "Unknown Team")
+    cycle_name = cycle.get("name") or f"Cycle {cycle.get('number', 'Unknown')}"
+
+    # Group issues by parent epic
+    epic_issues: dict[str, List[IssueData]] = defaultdict(list)
+    standalone_issues: List[IssueData] = []
+
+    for issue in issues:
+        parent = issue.get("parent")
+        if parent and parent.get("title"):
+            epic_key = f"{parent['identifier']}||{parent['title']}"  # Use identifier||title as key
+            epic_issues[epic_key].append(issue)
+        else:
+            standalone_issues.append(issue)
+
+    # Sort epics by: (1) highest priority of issues, (2) number of issues
+    def epic_sort_key(epic_key: str) -> tuple[float, int]:
+        epic_issue_list = epic_issues[epic_key]
+        # Get minimum priority value (1 is urgent/highest, 4 is low)
+        priorities = [issue.get("priority", 5) for issue in epic_issue_list]
+        min_priority = min(priorities) if priorities else 5
+        return (min_priority, -len(epic_issue_list))  # Negative for descending count
+
+    sorted_epic_keys = sorted(epic_issues.keys(), key=epic_sort_key)
+
+    # Helper to group issues by priority
+    def group_by_priority(issue_list: List[IssueData]) -> tuple[List[IssueData], List[IssueData], List[IssueData]]:
+        high = [i for i in issue_list if i.get("priority", 0) in [1, 2]]
+        medium = [i for i in issue_list if i.get("priority", 0) == 3]
+        low = [i for i in issue_list if i.get("priority", 0) in [0, 4]]
+        return high, medium, low
+
+    # Build markdown
+    lines = [
+        f"# Cycle Progress Report: {cycle_name}",
+        f"**Team:** {team_name} | **Period:** {start_date} to {end_date}",
+        "",
+    ]
+
+    # Major Epics section
+    if epic_issues:
+        lines.append("## Major Epics")
+        lines.append("")
+
+        for epic_key in sorted_epic_keys:
+            # Parse epic key
+            epic_identifier, epic_title = epic_key.split("||", 1)
+            epic_issue_list = epic_issues[epic_key]
+
+            lines.append(f"### [{epic_identifier}] {epic_title} ({len(epic_issue_list)} issues)")
+            lines.append("")
+
+            # Group by priority within epic
+            high, medium, low = group_by_priority(epic_issue_list)
+
+            if high:
+                lines.append(f"**High Priority** ({len(high)} issues)")
+                lines.append("")
+                for issue in high:
+                    issue_lines = format_issue_for_report(issue, show_assignee=True)
+                    lines.extend(issue_lines)
+
+            if medium:
+                lines.append(f"**Medium Priority** ({len(medium)} issues)")
+                lines.append("")
+                for issue in medium:
+                    issue_lines = format_issue_for_report(issue, show_assignee=True)
+                    lines.extend(issue_lines)
+
+            if low:
+                lines.append(f"**Low Priority** ({len(low)} issues)")
+                lines.append("")
+                for issue in low:
+                    issue_lines = format_issue_for_report(issue, show_assignee=True)
+                    lines.extend(issue_lines)
+
+    # Standalone Issues section
+    if standalone_issues:
+        lines.append("## Standalone Issues")
+        lines.append("")
+
+        high, medium, low = group_by_priority(standalone_issues)
+
+        if high:
+            lines.append("### High Priority")
+            lines.append("")
+            for issue in high:
+                issue_lines = format_issue_for_report(issue, show_assignee=True)
+                lines.extend(issue_lines)
+
+        if medium:
+            lines.append("### Medium Priority")
+            lines.append("")
+            for issue in medium:
+                issue_lines = format_issue_for_report(issue, show_assignee=True)
+                lines.extend(issue_lines)
+
+        if low:
+            lines.append("### Low Priority")
+            lines.append("")
+            for issue in low:
+                issue_lines = format_issue_for_report(issue, show_assignee=True)
+                lines.extend(issue_lines)
+
+    # Summary
+    lines.append("## Summary")
+    lines.append("")
+    if epic_issues:
+        lines.append(f"- **{len(epic_issues)} epics** with completed work")
+    if standalone_issues:
+        lines.append(f"- **{len(standalone_issues)} standalone issues** completed")
+    lines.append(f"- **{len(issues)} total issues** completed")
+
+    return "\n".join(lines)
+
+
+def generate_assignee_report_markdown(cycle: CycleData, issues: List[IssueData]) -> str:
+    """
+    Generate a markdown report grouped by assignee/team member.
+
+    Args:
+        cycle: Cycle data
+        issues: List of issues in the cycle
+
+    Returns:
+        Markdown formatted report
+    """
+    from datetime import datetime
+    from collections import defaultdict
+
+    # Parse dates
+    starts_at = cycle.get("startsAt", "")
+    ends_at = cycle.get("endsAt", "")
+
+    try:
+        start_date = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        end_date = datetime.fromisoformat(ends_at.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except:
+        start_date = starts_at
+        end_date = ends_at
+
+    team = cycle.get("team", {})
+    team_name = team.get("name", "Unknown Team")
+    cycle_name = cycle.get("name") or f"Cycle {cycle.get('number', 'Unknown')}"
+
+    # Group issues by assignee
+    assignee_issues: dict[str, List[IssueData]] = defaultdict(list)
+
+    for issue in issues:
+        assignee_data = issue.get("assignee")
+        assignee_name = assignee_data.get("name", "Unassigned") if assignee_data else "Unassigned"
+        assignee_issues[assignee_name].append(issue)
+
+    # Sort assignees by number of issues (descending), unassigned last
+    def assignee_sort_key(assignee_name: str) -> tuple[int, int, str]:
+        is_unassigned = 1 if assignee_name == "Unassigned" else 0
+        issue_count = -len(assignee_issues[assignee_name])  # Negative for descending
+        return (is_unassigned, issue_count, assignee_name)
+
+    sorted_assignees = sorted(assignee_issues.keys(), key=assignee_sort_key)
+
+    # Build markdown
+    lines = [
+        f"# Cycle Progress Report: {cycle_name}",
+        f"**Team:** {team_name} | **Period:** {start_date} to {end_date}",
+        "",
+        "## Team Contributions",
+        "",
+    ]
+
+    for assignee_name in sorted_assignees:
+        assignee_issue_list = assignee_issues[assignee_name]
+        issue_count = len(assignee_issue_list)
+
+        # Header for this person
+        if assignee_name == "Unassigned":
+            lines.append(f"### Unassigned ({issue_count} issues)")
+        else:
+            lines.append(f"### @{assignee_name} ({issue_count} issues)")
+        lines.append("")
+
+        # Group this person's issues by epic
+        epic_issues: dict[str, List[IssueData]] = defaultdict(list)
+        standalone_issues: List[IssueData] = []
+
+        for issue in assignee_issue_list:
+            parent = issue.get("parent")
+            if parent and parent.get("title"):
+                epic_key = f"{parent['identifier']}||{parent['title']}"
+                epic_issues[epic_key].append(issue)
+            else:
+                standalone_issues.append(issue)
+
+        # Sort epics by number of issues (descending)
+        sorted_epic_keys = sorted(epic_issues.keys(), key=lambda k: -len(epic_issues[k]))
+
+        # Show epic-grouped issues
+        for epic_key in sorted_epic_keys:
+            epic_identifier, epic_title = epic_key.split("||", 1)
+            epic_issue_list = epic_issues[epic_key]
+
+            lines.append(f"**Epic: [{epic_identifier}] {epic_title}** ({len(epic_issue_list)} issues)")
+            lines.append("")
+
+            for issue in epic_issue_list:
+                # Don't show assignee since we're already grouped by assignee
+                issue_lines = format_issue_for_report(issue, show_assignee=False)
+                lines.extend(issue_lines)
+
+        # Show standalone issues
+        if standalone_issues:
+            lines.append(f"**Standalone Work** ({len(standalone_issues)} issues)")
+            lines.append("")
+
+            for issue in standalone_issues:
+                issue_lines = format_issue_for_report(issue, show_assignee=False)
+                lines.extend(issue_lines)
+
+    # Summary
+    lines.append("## Summary")
+    lines.append("")
+
+    assigned_count = sum(len(issues) for name, issues in assignee_issues.items() if name != "Unassigned")
+    unassigned_count = len(assignee_issues.get("Unassigned", []))
+    contributor_count = len([name for name in assignee_issues.keys() if name != "Unassigned"])
+
+    lines.append(f"- **{contributor_count} team members** contributed")
+    lines.append(f"- **{assigned_count} assigned issues** completed")
+    if unassigned_count > 0:
+        lines.append(f"- **{unassigned_count} unassigned issues** completed")
+    lines.append(f"- **{len(issues)} total issues** completed")
+
+    # Top contributors
+    if contributor_count > 0:
+        lines.append("")
+        lines.append("**Top contributors:**")
+        top_assignees = [name for name in sorted_assignees if name != "Unassigned"][:5]  # Top 5
+        for name in top_assignees:
+            count = len(assignee_issues[name])
+            lines.append(f"- @{name}: {count} issues")
+
+    return "\n".join(lines)
+
+
 # ============================================================================
 # CLI Commands
 # ============================================================================
@@ -723,6 +1350,12 @@ def issue() -> None:
 @cli.group()
 def comment() -> None:
     """Manage issue comments."""
+    pass
+
+
+@cli.group()
+def report() -> None:
+    """Generate progress reports."""
     pass
 
 
@@ -1069,6 +1702,120 @@ def comment_create(issue_id: str, message: Optional[str]) -> None:
         sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@report.command("cycle")
+@click.option("--team", required=True, help="Team key (e.g., FLA, ENG)")
+@click.option("--cycle", "cycle_id", help="Cycle ID (defaults to active cycle)")
+@click.option("--include-in-progress", is_flag=True, help="Include in-progress issues in addition to completed")
+@click.option("--group-by", type=click.Choice(["priority", "epic", "assignee"], case_sensitive=False), default="priority", help="How to group issues in the report (default: priority)")
+def report_cycle(team: str, cycle_id: Optional[str], include_in_progress: bool, group_by: str) -> None:
+    """
+    Generate a markdown progress report for a cycle.
+
+    Grouping options:
+    - priority: Group by priority level, then by parent epic (default)
+    - epic: Group by parent epic, then by priority within each epic
+    - assignee: Group by team member, then by epic within each person
+
+    By default, only shows completed issues. Use --include-in-progress to also show work in progress.
+
+    Examples:
+        linear report cycle --team FLA
+        linear report cycle --team FLA --group-by epic
+        linear report cycle --team FLA --group-by assignee
+        linear report cycle --team FLA --group-by assignee --include-in-progress
+    """
+    try:
+        client = get_client()
+
+        # Resolve team ID
+        try:
+            team_id = resolve_team_id(client, team)
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            click.echo("\nAvailable teams:", err=True)
+            result = client.execute(LIST_TEAMS_QUERY)
+            for t in result.get("teams", {}).get("nodes", []):
+                click.echo(f"  - {t['key']}: {t['name']}", err=True)
+            sys.exit(1)
+
+        # Get cycle (active or specified)
+        if cycle_id:
+            # Use specific cycle
+            result = client.execute(
+                GET_CYCLE_WITH_ISSUES_QUERY,
+                variable_values={
+                    "cycleId": cycle_id,
+                    "filter": None,  # We'll filter after fetching
+                }
+            )
+            cycle = result.get("cycle")
+            if not cycle:
+                click.echo(f"Error: Cycle not found: {cycle_id}", err=True)
+                sys.exit(1)
+        else:
+            # Use active cycle
+            cycle_data = get_active_cycle(client, team_id)
+            if not cycle_data:
+                click.echo(f"Error: No active cycle found for team {team}", err=True)
+                sys.exit(1)
+
+            # Fetch full cycle with issues
+            result = client.execute(
+                GET_CYCLE_WITH_ISSUES_QUERY,
+                variable_values={
+                    "cycleId": cycle_data["id"],
+                    "filter": None,  # We'll filter after fetching
+                }
+            )
+            cycle = result.get("cycle")
+
+        if not cycle:
+            click.echo("Error: Failed to fetch cycle data", err=True)
+            sys.exit(1)
+
+        # Get issues from cycle
+        all_issues = cycle.get("issues", {}).get("nodes", [])
+
+        # Filter issues by state
+        if include_in_progress:
+            # Include both completed and started issues
+            filtered_issues = [
+                issue for issue in all_issues
+                if issue.get("status", {}).get("type") in ["completed", "started"]
+            ]
+        else:
+            # Only completed issues
+            filtered_issues = [
+                issue for issue in all_issues
+                if issue.get("status", {}).get("type") == "completed"
+            ]
+
+        if not filtered_issues:
+            state_msg = "completed or in-progress" if include_in_progress else "completed"
+            click.echo(f"No {state_msg} issues found in cycle {cycle['name']}", err=True)
+            sys.exit(0)
+
+        # Generate markdown report based on grouping preference
+        if group_by.lower() == "epic":
+            markdown = generate_epic_report_markdown(cycle, filtered_issues)
+        elif group_by.lower() == "assignee":
+            markdown = generate_assignee_report_markdown(cycle, filtered_issues)
+        else:  # Default: priority
+            markdown = generate_cycle_report_markdown(cycle, filtered_issues)
+
+        # Output to stdout
+        click.echo(markdown)
+
+    except TransportQueryError as e:
+        click.echo(f"Error fetching cycle data: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
