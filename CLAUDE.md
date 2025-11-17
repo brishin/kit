@@ -22,6 +22,8 @@ Add this repository as a Claude Code marketplace via `/plugin`.
 
 **Skill Generator**: Generate new Claude Code skills following best practices. Invoked when creating skills or learning skill architecture. Includes progressive loading optimization, security via allowed-tools, multi-file skill patterns, performance budgets, validation checklists, and quick-start templates.
 
+**PR Comments**: Fetch and analyze human review comments from GitHub PRs. Filters out bot comments and provides structured summaries of reviewer feedback, action items, and discussion themes. Uses a Python script for reliable comment fetching and filtering.
+
 ## Main Tool: `wt`
 
 A Python-based CLI tool using Click and Questionary that provides three main subcommands for git worktree management:
