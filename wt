@@ -19,10 +19,10 @@ Usage:
   wt root                   Navigate to git root directory
 """
 
-import sys
+import json
 import os
 import subprocess
-import json
+import sys
 from pathlib import Path
 
 import click
@@ -34,11 +34,7 @@ def run_command(cmd, capture=True, check=True):
     try:
         if capture:
             result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=check
+                cmd, shell=True, capture_output=True, text=True, check=check
             )
             # When check=False, we still need to return None on failure
             if not check and result.returncode != 0:
@@ -69,8 +65,12 @@ def cli():
 @cli.command()
 @click.argument("branch_name")
 @click.option("--prefix", default="bs", help="Branch prefix (default: bs)")
-@click.option("--base", "-b", default="main", help="Base branch to branch from (default: main)")
-@click.option("--remote", "-r", is_flag=True, help="Create worktree from existing remote branch")
+@click.option(
+    "--base", "-b", default="main", help="Base branch to branch from (default: main)"
+)
+@click.option(
+    "--remote", "-r", is_flag=True, help="Create worktree from existing remote branch"
+)
 def create(branch_name, prefix, base, remote):
     """Create a git worktree with standardized naming.
 
@@ -111,8 +111,7 @@ def create(branch_name, prefix, base, remote):
 
         # Check if branch exists on origin
         remote_ref_check = run_command(
-            f"git ls-remote --heads origin refs/heads/{branch_name}",
-            check=False
+            f"git ls-remote --heads origin refs/heads/{branch_name}", check=False
         )
         if not remote_ref_check:
             print(f"❌ Error: Branch '{branch_name}' does not exist on origin")
@@ -143,15 +142,22 @@ def create(branch_name, prefix, base, remote):
         sys.exit(1)
 
     # Check if branch already exists locally
-    local_branch_exists = run_command(f"git rev-parse --verify {full_branch}", check=False) is not None
+    local_branch_exists = (
+        run_command(f"git rev-parse --verify {full_branch}", check=False) is not None
+    )
 
     # Check if branch is already checked out in a worktree
     if local_branch_exists:
         worktree_list = run_command("git worktree list --porcelain")
         if worktree_list:
-            for line in worktree_list.split('\n'):
-                if line.startswith('branch ') and line.split(' ', 1)[1] == f"refs/heads/{full_branch}":
-                    print(f"❌ Error: Branch {full_branch} is already checked out in a worktree")
+            for line in worktree_list.split("\n"):
+                if (
+                    line.startswith("branch ")
+                    and line.split(" ", 1)[1] == f"refs/heads/{full_branch}"
+                ):
+                    print(
+                        f"❌ Error: Branch {full_branch} is already checked out in a worktree"
+                    )
                     print("\nExisting worktrees:")
                     print(run_command("git worktree list"))
                     sys.exit(1)
@@ -161,10 +167,14 @@ def create(branch_name, prefix, base, remote):
         if local_branch_exists:
             # Both local and remote exist - check if they differ
             local_commit = run_command(f"git rev-parse {full_branch}", check=False)
-            remote_commit = run_command(f"git rev-parse origin/{full_branch}", check=False)
+            remote_commit = run_command(
+                f"git rev-parse origin/{full_branch}", check=False
+            )
 
             if local_commit != remote_commit:
-                print(f"⚠️  Local branch '{full_branch}' exists but differs from origin/{full_branch}")
+                print(
+                    f"⚠️  Local branch '{full_branch}' exists but differs from origin/{full_branch}"
+                )
                 print(f"   Local:  {local_commit[:8] if local_commit else 'unknown'}")
                 print(f"   Remote: {remote_commit[:8] if remote_commit else 'unknown'}")
                 print()
@@ -174,8 +184,8 @@ def create(branch_name, prefix, base, remote):
                     choices=[
                         "Use local branch",
                         "Use remote branch (reset local to match)",
-                        "Abort"
-                    ]
+                        "Abort",
+                    ],
                 ).ask()
 
                 if choice == "Abort":
@@ -183,15 +193,22 @@ def create(branch_name, prefix, base, remote):
                     sys.exit(0)
                 elif choice == "Use remote branch (reset local to match)":
                     # Reset local to match remote
-                    print(f"Resetting local branch '{full_branch}' to match origin/{full_branch}...")
-                    run_command(f"git branch -f {full_branch} origin/{full_branch}", capture=False)
+                    print(
+                        f"Resetting local branch '{full_branch}' to match origin/{full_branch}..."
+                    )
+                    run_command(
+                        f"git branch -f {full_branch} origin/{full_branch}",
+                        capture=False,
+                    )
                 # If "Use local branch", just continue with existing local
 
             # Create worktree with existing local branch
             cmd = f"git worktree add {worktree_dir} {full_branch}"
         else:
             # No local branch - create it tracking the remote
-            cmd = f"git worktree add -b {full_branch} {worktree_dir} origin/{full_branch}"
+            cmd = (
+                f"git worktree add -b {full_branch} {worktree_dir} origin/{full_branch}"
+            )
     else:
         # Regular mode (non-remote)
         if local_branch_exists:
@@ -199,7 +216,7 @@ def create(branch_name, prefix, base, remote):
 
             use_existing = questionary.confirm(
                 "Do you want to create a worktree for the existing branch?",
-                default=True
+                default=True,
             ).ask()
 
             if not use_existing:
@@ -235,7 +252,7 @@ def create(branch_name, prefix, base, remote):
     # Output cd command to fd 3 for shell to eval
     # worktree_dir is already an absolute path from os.path.join(git_root, ...)
     try:
-        with open('/dev/fd/3', 'w') as fd3:
+        with open("/dev/fd/3", "w") as fd3:
             fd3.write(f"cd '{worktree_dir}'\n")
     except (OSError, IOError):
         # fd 3 not available, output to stderr as fallback
@@ -279,8 +296,7 @@ def cleanup():
         print("   These changes will be lost if you proceed.")
         print()
         continue_cleanup = questionary.confirm(
-            "Continue with cleanup?",
-            default=False
+            "Continue with cleanup?", default=False
         ).ask()
         if not continue_cleanup:
             print("Aborted.")
@@ -289,8 +305,7 @@ def cleanup():
 
     # Check if branch has unique commits compared to main
     unique_commits = run_command(
-        f"git rev-list origin/main..{current_branch} --count",
-        check=False
+        f"git rev-list origin/main..{current_branch} --count", check=False
     )
     if unique_commits is None:
         unique_commits = "0"
@@ -313,7 +328,7 @@ def cleanup():
     # Check if PR associated with this branch has been merged
     pr_status = run_command(
         f"gh pr list --state merged --head {current_branch} --json number,state,title --jq '.[0]'",
-        check=False
+        check=False,
     )
 
     if not pr_status or pr_status == "null":
@@ -321,8 +336,7 @@ def cleanup():
         print(f"   Branch '{current_branch}' has {unique_commits} unmerged commit(s)")
         print()
         confirm_delete = questionary.confirm(
-            "Delete branch and worktree anyway?",
-            default=False
+            "Delete branch and worktree anyway?", default=False
         ).ask()
         if not confirm_delete:
             print("Aborted.")
@@ -372,7 +386,7 @@ def root():
 
     # Output cd command to fd 3 for shell to eval
     try:
-        with open('/dev/fd/3', 'w') as fd3:
+        with open("/dev/fd/3", "w") as fd3:
             fd3.write(f"cd '{git_root}'\n")
     except (OSError, IOError):
         # fd 3 not available, output to stderr as fallback
