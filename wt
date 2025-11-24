@@ -16,6 +16,7 @@ Setup: Add these aliases to your ~/.bashrc or ~/.zshrc:
 Usage:
   wt create <branch-name>   Create a git worktree with standardized naming
   wt cleanup                Safely delete current branch and worktree
+  wt reuse [branch-name]    Reuse current worktree for a new branch
   wt root                   Navigate to git root directory
 """
 
@@ -369,6 +370,138 @@ def cleanup():
     print(f"✓ Deleted branch '{current_branch}'")
     run_command(f"git worktree remove --force {worktree_path}", capture=False)
     print(f"✓ Deleted worktree at '{worktree_path}'")
+
+
+@cli.command()
+@click.argument("branch_name", required=False)
+@click.option("--prefix", default="bs", help="Branch prefix (default: bs)")
+@click.option(
+    "--base", "-b", default="main", help="Base branch to branch from (default: main)"
+)
+def reuse(branch_name, prefix, base):
+    """Reuse current worktree directory for a new branch.
+
+    This command:
+    1. Checks if current branch can be safely deleted (like cleanup)
+    2. Prompts for new branch name if not provided
+    3. Deletes old branch and creates new branch in same worktree
+
+    Example: wt reuse new-feature
+      -> Deletes current branch
+      -> Creates branch: bs/new-feature in current worktree
+    """
+    if not check_git_repo():
+        print("❌ Error: Not in a git repository")
+        sys.exit(1)
+
+    current_branch = run_command("git rev-parse --abbrev-ref HEAD")
+    if not current_branch:
+        print("❌ Error: Could not determine current branch")
+        sys.exit(1)
+
+    if current_branch in ["main", "master"]:
+        print("❌ Cannot reuse main/master branch")
+        sys.exit(1)
+
+    print(f"Current branch: {current_branch}")
+    print("Checking if branch can be safely reused...")
+    print()
+
+    status_result = run_command("git status --porcelain", check=False)
+    if status_result:
+        print("⚠️  Warning: You have uncommitted changes!")
+        print("   These changes will be lost if you proceed.")
+        print()
+        continue_reuse = questionary.confirm(
+            "Continue with reuse?", default=False
+        ).ask()
+        if not continue_reuse:
+            print("Aborted.")
+            sys.exit(0)
+        print()
+
+    unique_commits = run_command(
+        f"git rev-list origin/{base}..{current_branch} --count", check=False
+    )
+    if unique_commits is None:
+        unique_commits = "0"
+
+    if unique_commits != "0":
+        print(f"Found {unique_commits} unique commit(s) on this branch")
+        print("Checking if associated PR has been merged...")
+        print()
+
+        pr_status = run_command(
+            f"gh pr list --state merged --head {current_branch} --json number,state,title --jq '.[0]'",
+            check=False,
+        )
+
+        if not pr_status or pr_status == "null":
+            print("⚠️  No merged PR found for this branch")
+            print(
+                f"   Branch '{current_branch}' has {unique_commits} unmerged commit(s)"
+            )
+            print()
+            confirm_reuse = questionary.confirm(
+                "Reuse worktree anyway? (unmerged work will be lost)", default=False
+            ).ask()
+            if not confirm_reuse:
+                print("Aborted.")
+                sys.exit(0)
+            print()
+        else:
+            try:
+                pr_data = json.loads(pr_status)
+                pr_number = pr_data.get("number")
+                pr_title = pr_data.get("title")
+                print(f"✓ Found merged PR #{pr_number}: {pr_title}")
+                print()
+            except (json.JSONDecodeError, AttributeError):
+                print("⚠️  Could not parse PR information")
+                print()
+
+    if not branch_name:
+        branch_name = questionary.text(
+            "Enter new branch name:",
+            validate=lambda text: len(text) > 0 or "Branch name cannot be empty",
+        ).ask()
+
+        if not branch_name:
+            print("Aborted.")
+            sys.exit(0)
+
+    branch_base = branch_name.replace(f"{prefix}/", "")
+    full_branch = f"{prefix}/{branch_base}"
+
+    branch_exists = (
+        run_command(f"git rev-parse --verify {full_branch}", check=False) is not None
+    )
+    if branch_exists:
+        print(f"❌ Error: Branch '{full_branch}' already exists")
+        sys.exit(1)
+
+    print(f"→ Reusing worktree for new branch: {full_branch}")
+    print()
+
+    worktree_path = os.getcwd()
+
+    print(f"Checking out {base}...")
+    run_command(f"git checkout --detach origin/{base}", capture=False)
+
+    print(f"Deleting old branch '{current_branch}'...")
+    run_command(f"git branch -D {current_branch}", capture=False)
+
+    print(f"Creating new branch '{full_branch}'...")
+    run_command(f"git checkout -b {full_branch}", capture=False)
+
+    print()
+    print("✅ Worktree reused successfully")
+    print(f"   Old branch: {current_branch} (deleted)")
+    print(f"   New branch: {full_branch}")
+    print(f"   Location: {worktree_path}")
+
+    if run_command("command -v gt", check=False):
+        run_command(f"gt track --parent {base} --quiet", capture=False, check=False)
 
 
 @cli.command()
