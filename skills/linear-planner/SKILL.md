@@ -74,9 +74,11 @@ After research and clarification, use `ExitPlanMode` to present:
 - Files to modify
 - Remaining questions (if any)
 
-### 7. Update Linear Description
+### 7. Update Linear Description (Only If Requested)
 
-Use the Linear CLI to update the description with the approved implementation plan.
+**Only update the Linear issue description if the user explicitly requests it.**
+
+If requested, use the Linear CLI to update the description with the approved implementation plan.
 Use the following template:
 ```
 # Implementation Plan ({Current Date})
