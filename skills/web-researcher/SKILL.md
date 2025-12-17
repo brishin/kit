@@ -26,15 +26,13 @@ Optional flags:
 
 The websearch tool uses this optimized prompt by default:
 
-> "Provide practical technical guidance for AI coding assistants. When multiple approaches exist, explain key tradeoffs. Include concrete code examples. Prioritize actionable information."
+> "Technical reference for AI coding agents. Include code examples, gotchas, and edge cases. Match depth to query complexity. Gaps in practical details cost downstream coding time."
 
-**This concise default was optimized in Oct 2025** based on evaluation of 72 queries across diverse task types. It provides:
-- **33% faster response times** vs previous comprehensive prompt
-- **Balanced quality and latency** - appropriate detail without over-generation
-- **Code examples and tradeoff analysis** when relevant
-- **Practical, actionable information** focused on solving problems
-
-For details on the optimization, see `eval/RECOMMENDATIONS.md`.
+This produces:
+- **Gotchas/edge cases sections** - catches pitfalls early
+- **Flexible depth** - matches output length to query complexity
+- **Code examples** with platform-specific variations
+- **Actionable guidance** - security checklists, decision matrices, debug commands
 
 ## When to Override the System Prompt
 

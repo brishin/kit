@@ -47,9 +47,7 @@ MODEL_ALIASES = {
 }
 
 # Optimized system prompt for AI coding agent queries
-# Concise variant (2025-10-20): 33% faster than previous comprehensive prompt
-# Based on evaluation of 72 test queries (18 queries × 4 prompt variants)
-RECOMMENDED_PROMPT = """Provide practical technical guidance for AI coding assistants. When multiple approaches exist, explain key tradeoffs. Include concrete code examples. Prioritize actionable information."""
+RECOMMENDED_PROMPT = """Technical reference for AI coding agents. Include code examples, gotchas, and edge cases. Match depth to query complexity. Gaps in practical details cost downstream coding time."""
 
 
 @click.command()
