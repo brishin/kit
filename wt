@@ -57,7 +57,25 @@ def check_git_repo():
     return result is not None
 
 
-@click.group()
+class AliasedGroup(click.Group):
+    """Click group with command aliases."""
+
+    aliases = {
+        "c": "create",
+        "cl": "cleanup",
+    }
+
+    def get_command(self, ctx, cmd_name):
+        rv = super().get_command(ctx, cmd_name)
+        if rv is not None:
+            return rv
+        real_name = self.aliases.get(cmd_name)
+        if real_name:
+            return super().get_command(ctx, real_name)
+        return None
+
+
+@click.group(cls=AliasedGroup)
 def cli():
     """Unified git worktree management CLI."""
     pass
