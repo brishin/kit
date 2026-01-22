@@ -305,6 +305,13 @@ def cleanup():
         print("❌ Cannot delete main/master branch")
         sys.exit(1)
 
+    # Check if we're in a worktree (not the main repo)
+    cwd = os.getcwd()
+    if "/.worktrees/" not in cwd:
+        print("❌ Cannot cleanup from main worktree")
+        print("   This command is only for cleaning up worktrees in .worktrees/")
+        sys.exit(1)
+
     print(f"Checking if branch '{current_branch}' can be safely deleted...")
     print()
 
@@ -419,6 +426,13 @@ def reuse(branch_name, prefix, base):
 
     if current_branch in ["main", "master"]:
         print("❌ Cannot reuse main/master branch")
+        sys.exit(1)
+
+    # Check if we're in a worktree (not the main repo)
+    cwd = os.getcwd()
+    if "/.worktrees/" not in cwd:
+        print("❌ Cannot reuse from main worktree")
+        print("   This command is only for reusing worktrees in .worktrees/")
         sys.exit(1)
 
     print(f"Current branch: {current_branch}")
