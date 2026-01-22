@@ -4,6 +4,7 @@
 # dependencies = [
 #   "questionary",
 #   "click",
+#   "gitpython",
 # ]
 # ///
 """
@@ -28,6 +29,28 @@ from pathlib import Path
 
 import click
 import questionary
+from git import Repo
+from git.exc import InvalidGitRepositoryError
+
+
+def get_repo():
+    """Get the git repo, returning None if not in a repo."""
+    try:
+        return Repo(".", search_parent_directories=True)
+    except InvalidGitRepositoryError:
+        return None
+
+
+def branch_exists_locally(repo, branch_name):
+    """Check if a branch exists locally."""
+    return branch_name in [h.name for h in repo.heads]
+
+
+def branch_exists_on_remote(repo, branch_name, remote_name="origin"):
+    """Check if a branch exists on a remote. Fetches first to get latest refs."""
+    remote = repo.remotes[remote_name]
+    remote.fetch()
+    return any(ref.remote_head == branch_name for ref in remote.refs)
 
 
 def run_command(cmd, capture=True, check=True):
@@ -245,8 +268,23 @@ def create(branch_name, prefix, base, remote):
             # Use existing branch (remove -B flag)
             cmd = f"git worktree add {worktree_dir} {full_branch}"
         else:
-            # Create new branch based on specified base branch
-            cmd = f"git worktree add -B {full_branch} {worktree_dir} {base}"
+            # Check if base branch exists locally (using GitPython)
+            repo = get_repo()
+            if not branch_exists_locally(repo, base):
+                # Try to fetch from origin
+                print(f"⚠️  Base branch '{base}' not found locally, checking origin...")
+                if not branch_exists_on_remote(repo, base):
+                    print(
+                        f"❌ Error: Base branch '{base}' does not exist locally or on origin"
+                    )
+                    sys.exit(1)
+
+                print(f"✓ Found remote branch: origin/{base}")
+                # Use origin/{base} as the starting point
+                cmd = f"git worktree add -B {full_branch} {worktree_dir} origin/{base}"
+            else:
+                # Create new branch based on local base branch
+                cmd = f"git worktree add -B {full_branch} {worktree_dir} {base}"
 
     # Create the .worktrees directory if it doesn't exist (at repo root)
     worktrees_dir = os.path.join(git_root, ".worktrees")
