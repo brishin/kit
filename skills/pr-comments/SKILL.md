@@ -15,8 +15,10 @@ gh pr view --json number -q .number
 
 ## 2. Fetch Comments
 ```bash
-scripts/fetch-pr-comments <PR_NUMBER>              # Current repo
-scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO> # Different repo
+scripts/fetch-pr-comments <PR_NUMBER>                         # Human comments only
+scripts/fetch-pr-comments <PR_NUMBER> --include-bots          # Include bot comments
+scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO>            # Different repo
+scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO> --include-bots
 ```
 
 ## 3. Summarize

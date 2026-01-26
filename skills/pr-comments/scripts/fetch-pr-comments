@@ -42,13 +42,16 @@ def is_bot_user(user_data: dict[str, Any]) -> bool:
     return user_type == "Bot" or login.endswith("[bot]")
 
 
-def fetch_review_summaries(pr_number: str, repo: str | None = None) -> list[ReviewComment]:
+def fetch_review_summaries(
+    pr_number: str, repo: str | None = None, include_bots: bool = False
+) -> list[ReviewComment]:
     """
     Fetch high-level review summaries (approve, request changes, comment).
 
     Args:
         pr_number: The GitHub PR number
         repo: Optional repository in owner/repo format (defaults to current repo)
+        include_bots: If True, include bot reviews (default: False)
 
     Returns:
         List of review comment dictionaries
@@ -75,8 +78,8 @@ def fetch_review_summaries(pr_number: str, repo: str | None = None) -> list[Revi
         human_reviews: list[ReviewComment] = []
 
         for review in reviews:
-            # Skip bot reviews
-            if is_bot_user(review.get("user", {})):
+            # Skip bot reviews unless include_bots is True
+            if not include_bots and is_bot_user(review.get("user", {})):
                 continue
 
             # Only include reviews with actual body text
@@ -103,13 +106,16 @@ def fetch_review_summaries(pr_number: str, repo: str | None = None) -> list[Revi
         return []
 
 
-def fetch_inline_comments(pr_number: str, repo: str | None = None) -> list[InlineComment]:
+def fetch_inline_comments(
+    pr_number: str, repo: str | None = None, include_bots: bool = False
+) -> list[InlineComment]:
     """
     Fetch inline code review comments.
 
     Args:
         pr_number: The GitHub PR number
         repo: Optional repository in owner/repo format (defaults to current repo)
+        include_bots: If True, include bot comments (default: False)
 
     Returns:
         List of inline comment dictionaries
@@ -136,8 +142,8 @@ def fetch_inline_comments(pr_number: str, repo: str | None = None) -> list[Inlin
         human_comments: list[InlineComment] = []
 
         for comment in comments:
-            # Skip bot comments
-            if is_bot_user(comment.get("user", {})):
+            # Skip bot comments unless include_bots is True
+            if not include_bots and is_bot_user(comment.get("user", {})):
                 continue
 
             # Get line number (try different fields as they vary by comment type)
@@ -165,27 +171,40 @@ def fetch_inline_comments(pr_number: str, repo: str | None = None) -> list[Inlin
 def main() -> None:
     """Main entry point for the script."""
     if len(sys.argv) < 2:
-        print("Usage: fetch-pr-comments <PR_NUMBER> [OWNER/REPO]", file=sys.stderr)
+        print(
+            "Usage: fetch-pr-comments <PR_NUMBER> [OWNER/REPO] [--include-bots]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    pr_number = sys.argv[1]
-    repo = sys.argv[2] if len(sys.argv) > 2 else None
+    # Parse arguments
+    args = sys.argv[1:]
+    include_bots = "--include-bots" in args
+    if include_bots:
+        args.remove("--include-bots")
 
-    print("=== REVIEW SUMMARIES (Human Only) ===")
-    reviews = fetch_review_summaries(pr_number, repo)
+    pr_number = args[0]
+    repo = args[1] if len(args) > 1 else None
+
+    # Set labels based on whether bots are included
+    filter_label = "All" if include_bots else "Human Only"
+    no_results_prefix = "No" if include_bots else "No human"
+
+    print(f"=== REVIEW SUMMARIES ({filter_label}) ===")
+    reviews = fetch_review_summaries(pr_number, repo, include_bots)
     if reviews:
         for review in reviews:
             print(json.dumps(review, indent=2))
     else:
-        print("No human review summaries found.")
+        print(f"{no_results_prefix} review summaries found.")
 
-    print("\n=== INLINE REVIEW COMMENTS (Human Only) ===")
-    comments = fetch_inline_comments(pr_number, repo)
+    print(f"\n=== INLINE REVIEW COMMENTS ({filter_label}) ===")
+    comments = fetch_inline_comments(pr_number, repo, include_bots)
     if comments:
         for comment in comments:
             print(json.dumps(comment, indent=2))
     else:
-        print("No human inline comments found.")
+        print(f"{no_results_prefix} inline comments found.")
 
 
 if __name__ == "__main__":
