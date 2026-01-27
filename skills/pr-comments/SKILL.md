@@ -1,6 +1,6 @@
 ---
 name: "PR Comments"
-description: "Fetch and analyze human review comments from GitHub PRs. Use when reviewing PR feedback, addressing reviewer requests, or summarizing PR discussion."
+description: "Fetch and analyze review comments from GitHub PRs. Use when reviewing PR feedback, addressing reviewer requests, or summarizing PR discussion."
 allowed-tools: [Bash]
 version: "1.0.0"
 ---
@@ -15,10 +15,10 @@ gh pr view --json number -q .number
 
 ## 2. Fetch Comments
 ```bash
-scripts/fetch-pr-comments <PR_NUMBER>                         # Human comments only
-scripts/fetch-pr-comments <PR_NUMBER> --include-bots          # Include bot comments
+scripts/fetch-pr-comments <PR_NUMBER>                         # All comments (default)
+scripts/fetch-pr-comments <PR_NUMBER> --exclude-bots          # Human comments only
 scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO>            # Different repo
-scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO> --include-bots
+scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO> --exclude-bots
 ```
 
 ## 3. Summarize
