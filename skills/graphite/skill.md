@@ -140,6 +140,8 @@ When parent branches change (due to amendments, trunk updates, or merges), child
 - `gt sync` restacks after trunk updates
 - `gt restack` manually triggers restacking
 
+**For complex restructuring** (inserting branches below current, fixing broken parent relationships, splitting work into stacked branches, worktree issues): **READ `docs/restacking.md` FIRST.** These operations are error-prone and the doc covers critical patterns like using `gt info` to diagnose relationships and `gt track --parent` to fix them.
+
 ## Trunk-Based Development
 
 Graphite is optimized for trunk-based development:
@@ -306,6 +308,8 @@ Choose the right approach for your change:
 3. **Creating too many small PRs** - Balance reviewability with overhead
 4. **Waiting too long to merge** - Merge bottom PRs first to avoid conflicts
 5. **Mixing Graphite and standard git** - Pick one workflow to avoid confusion
+6. **Restructuring stacks without `gt info`** - Before fixing parent relationships or inserting branches, use `gt info <branch>` to see actual parent/child state. See `docs/restacking.md`
+7. **Confusing `gt trunk` with navigation** - `gt trunk` only prints the trunk name. Use `gt co -t` to checkout trunk
 
 # Integration with Standard Git
 
@@ -324,4 +328,5 @@ But prefer `gt` commands for operations that affect branch structure.
 For complete command details, see:
 - `docs/command-reference.md` - Full command list with all flags
 - `docs/best-practices.md` - Detailed stack structuring guidance
+- `docs/restacking.md` - Fixing parent relationships, inserting branches below current, worktree issues
 - Or run: `gt docs` to open official documentation
