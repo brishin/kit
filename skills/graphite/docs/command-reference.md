@@ -510,7 +510,7 @@ gt children
 
 ### `gt trunk`
 
-Display the trunk branch.
+Print the trunk branch name (outputs to stdout, does **not** navigate). Use `gt co -t` to checkout trunk.
 
 ```bash
 gt trunk [options]
