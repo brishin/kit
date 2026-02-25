@@ -23,6 +23,7 @@ Usage:
 
 import json
 import os
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -316,6 +317,47 @@ def create(branch_name, prefix, base, remote):
         print(f"cd '{worktree_dir}'", file=sys.stderr)
 
 
+def cleanup_derived_data(worktree_path: str) -> None:
+    """Spawn a background process to delete DerivedData folders for this worktree."""
+    derived_data_dir = Path.home() / "Library" / "Developer" / "Xcode" / "DerivedData"
+    if not derived_data_dir.is_dir():
+        return
+
+    matching: list[Path] = []
+    for entry in derived_data_dir.iterdir():
+        info_plist = entry / "info.plist"
+        if not info_plist.is_file():
+            continue
+        try:
+            with open(info_plist, "rb") as f:
+                data = plistlib.load(f)
+            workspace_path = data.get("WorkspacePath", "")
+            try:
+                Path(workspace_path).relative_to(worktree_path)
+                matching.append(entry)
+            except ValueError:
+                pass
+        except Exception:
+            pass
+
+    if not matching:
+        return
+
+    print(f"Cleaning up {len(matching)} DerivedData folder(s) in background...")
+    paths = [str(p) for p in matching]
+    script = (
+        "import shutil, sys\n"
+        "for p in sys.argv[1:]:\n"
+        "    shutil.rmtree(p, ignore_errors=True)\n"
+    )
+    subprocess.Popen(
+        [sys.executable, "-c", script, *paths],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 @cli.command()
 def cleanup():
     """Safely delete current branch and worktree.
@@ -383,6 +425,7 @@ def cleanup():
         print(f"✓ Deleted branch '{current_branch}'")
         run_command(f"git worktree remove --force {worktree_path}", capture=False)
         print(f"✓ Deleted worktree at '{worktree_path}'")
+        cleanup_derived_data(worktree_path)
         sys.exit(0)
 
     print(f"Found {unique_commits} unique commit(s) on this branch")
@@ -413,6 +456,7 @@ def cleanup():
         print(f"✓ Deleted branch '{current_branch}'")
         run_command(f"git worktree remove --force {worktree_path}", capture=False)
         print(f"✓ Deleted worktree at '{worktree_path}'")
+        cleanup_derived_data(worktree_path)
         sys.exit(0)
 
     # Extract PR details
@@ -433,6 +477,7 @@ def cleanup():
     print(f"✓ Deleted branch '{current_branch}'")
     run_command(f"git worktree remove --force {worktree_path}", capture=False)
     print(f"✓ Deleted worktree at '{worktree_path}'")
+    cleanup_derived_data(worktree_path)
 
 
 @cli.command()
