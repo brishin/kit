@@ -106,7 +106,7 @@ def cli():
 
 
 @cli.command()
-@click.argument("branch_name")
+@click.argument("branch_name", required=False)
 @click.option("--prefix", default="bs", help="Branch prefix (default: bs)")
 @click.option(
     "--base", "-b", default="main", help="Base branch to branch from (default: main)"
@@ -114,7 +114,8 @@ def cli():
 @click.option(
     "--remote", "-r", is_flag=True, help="Create worktree from existing remote branch"
 )
-def create(branch_name, prefix, base, remote):
+@click.option("--hook", is_flag=True, hidden=True, help="Hook mode for Claude Code")
+def create(branch_name, prefix, base, remote, hook):
     """Create a git worktree with standardized naming.
 
     Example: wt create resend-email
@@ -125,16 +126,35 @@ def create(branch_name, prefix, base, remote):
       -> Tracks origin/feature-branch as feature-branch
       -> Creates worktree at: ./.worktrees/feature-branch
     """
+    # In hook mode, stdout is reserved for the worktree path output.
+    # Redirect fd 1 → fd 2 at the OS level so subprocesses inherit stderr.
+    if hook:
+        _real_stdout_fd = os.dup(1)
+        _real_stdout = os.fdopen(_real_stdout_fd, "w")
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
+    else:
+        _real_stdout = sys.stdout
+    out = sys.stderr if hook else sys.stdout
+
+    if hook:
+        hook_data = json.loads(sys.stdin.read())
+        branch_name = hook_data["name"]
+        os.chdir(hook_data["cwd"])
+    elif not branch_name:
+        print("Error: Missing argument 'BRANCH_NAME'.", file=sys.stderr)
+        sys.exit(1)
+
     # Check if we're in a git repo
     if not check_git_repo():
-        print("❌ Error: Not in a git repository")
+        print("❌ Error: Not in a git repository", file=out)
         sys.exit(1)
 
     # Get the main repository root (not the current worktree root)
     # git rev-parse --git-common-dir gives us the main .git directory
     git_common_dir = run_command("git rev-parse --git-common-dir")
     if not git_common_dir:
-        print("❌ Error: Could not determine git directory")
+        print("❌ Error: Could not determine git directory", file=out)
         sys.exit(1)
 
     # The main repo root is the parent of the .git directory
@@ -148,19 +168,19 @@ def create(branch_name, prefix, base, remote):
         worktree_dir = os.path.join(git_root, ".worktrees", worktree_dir_name)
 
         # Fetch latest from origin to ensure up-to-date refs
-        print("🔄 Fetching from origin...")
+        print("🔄 Fetching from origin...", file=out)
         run_command("git fetch origin", capture=False)
-        print()
+        print(file=out)
 
         # Check if branch exists on origin
         remote_ref_check = run_command(
             f"git ls-remote --heads origin refs/heads/{branch_name}", check=False
         )
         if not remote_ref_check:
-            print(f"❌ Error: Branch '{branch_name}' does not exist on origin")
+            print(f"❌ Error: Branch '{branch_name}' does not exist on origin", file=out)
             sys.exit(1)
 
-        print(f"✓ Found remote branch: origin/{branch_name}")
+        print(f"✓ Found remote branch: origin/{branch_name}", file=out)
     else:
         # Regular mode: apply prefix convention
         # Remove any existing prefix if user provided it
@@ -170,18 +190,23 @@ def create(branch_name, prefix, base, remote):
         full_branch = f"{prefix}/{branch_base}"
         worktree_dir = os.path.join(git_root, ".worktrees", f"{prefix}-{branch_base}")
 
-    print(f"Branch: {full_branch}")
-    print(f"Worktree directory: {worktree_dir}")
-    print()
+    print(f"Branch: {full_branch}", file=out)
+    print(f"Worktree directory: {worktree_dir}", file=out)
+    print(file=out)
 
     # Check if worktree directory already exists
     if Path(worktree_dir).exists():
-        print(f"❌ Error: Directory {worktree_dir} already exists")
+        if hook:
+            # Reuse existing worktree
+            print(worktree_dir, file=_real_stdout)
+            sys.exit(0)
+
+        print(f"❌ Error: Directory {worktree_dir} already exists", file=out)
 
         # Show existing worktrees
-        print("\nExisting worktrees:")
+        print("\nExisting worktrees:", file=out)
         worktree_list = run_command("git worktree list")
-        print(worktree_list if worktree_list else "")
+        print(worktree_list if worktree_list else "", file=out)
         sys.exit(1)
 
     # Check if branch already exists locally
@@ -199,10 +224,11 @@ def create(branch_name, prefix, base, remote):
                     and line.split(" ", 1)[1] == f"refs/heads/{full_branch}"
                 ):
                     print(
-                        f"❌ Error: Branch {full_branch} is already checked out in a worktree"
+                        f"❌ Error: Branch {full_branch} is already checked out in a worktree",
+                        file=out,
                     )
-                    print("\nExisting worktrees:")
-                    print(run_command("git worktree list"))
+                    print("\nExisting worktrees:", file=out)
+                    print(run_command("git worktree list"), file=out)
                     sys.exit(1)
 
     # Handle remote branch mode
@@ -216,28 +242,34 @@ def create(branch_name, prefix, base, remote):
 
             if local_commit != remote_commit:
                 print(
-                    f"⚠️  Local branch '{full_branch}' exists but differs from origin/{full_branch}"
+                    f"⚠️  Local branch '{full_branch}' exists but differs from origin/{full_branch}",
+                    file=out,
                 )
-                print(f"   Local:  {local_commit[:8] if local_commit else 'unknown'}")
-                print(f"   Remote: {remote_commit[:8] if remote_commit else 'unknown'}")
-                print()
+                print(f"   Local:  {local_commit[:8] if local_commit else 'unknown'}", file=out)
+                print(f"   Remote: {remote_commit[:8] if remote_commit else 'unknown'}", file=out)
+                print(file=out)
 
-                choice = questionary.select(
-                    "Which version do you want to use?",
-                    choices=[
-                        "Use local branch",
-                        "Use remote branch (reset local to match)",
-                        "Abort",
-                    ],
-                ).ask()
+                if hook:
+                    # In hook mode, always use remote
+                    choice = "Use remote branch (reset local to match)"
+                else:
+                    choice = questionary.select(
+                        "Which version do you want to use?",
+                        choices=[
+                            "Use local branch",
+                            "Use remote branch (reset local to match)",
+                            "Abort",
+                        ],
+                    ).ask()
 
                 if choice == "Abort":
-                    print("Aborted.")
+                    print("Aborted.", file=out)
                     sys.exit(0)
                 elif choice == "Use remote branch (reset local to match)":
                     # Reset local to match remote
                     print(
-                        f"Resetting local branch '{full_branch}' to match origin/{full_branch}..."
+                        f"Resetting local branch '{full_branch}' to match origin/{full_branch}...",
+                        file=out,
                     )
                     run_command(
                         f"git branch -f {full_branch} origin/{full_branch}",
@@ -255,16 +287,17 @@ def create(branch_name, prefix, base, remote):
     else:
         # Regular mode (non-remote)
         if local_branch_exists:
-            print(f"⚠️  Branch {full_branch} already exists")
+            print(f"⚠️  Branch {full_branch} already exists", file=out)
 
-            use_existing = questionary.confirm(
-                "Do you want to create a worktree for the existing branch?",
-                default=True,
-            ).ask()
+            if not hook:
+                use_existing = questionary.confirm(
+                    "Do you want to create a worktree for the existing branch?",
+                    default=True,
+                ).ask()
 
-            if not use_existing:
-                print("Aborted.")
-                sys.exit(0)
+                if not use_existing:
+                    print("Aborted.", file=out)
+                    sys.exit(0)
 
             # Use existing branch (remove -B flag)
             cmd = f"git worktree add {worktree_dir} {full_branch}"
@@ -273,14 +306,15 @@ def create(branch_name, prefix, base, remote):
             repo = get_repo()
             if not branch_exists_locally(repo, base):
                 # Try to fetch from origin
-                print(f"⚠️  Base branch '{base}' not found locally, checking origin...")
+                print(f"⚠️  Base branch '{base}' not found locally, checking origin...", file=out)
                 if not branch_exists_on_remote(repo, base):
                     print(
-                        f"❌ Error: Base branch '{base}' does not exist locally or on origin"
+                        f"❌ Error: Base branch '{base}' does not exist locally or on origin",
+                        file=out,
                     )
                     sys.exit(1)
 
-                print(f"✓ Found remote branch: origin/{base}")
+                print(f"✓ Found remote branch: origin/{base}", file=out)
                 # Use origin/{base} as the starting point
                 cmd = f"git worktree add -B {full_branch} {worktree_dir} origin/{base}"
             else:
@@ -292,29 +326,34 @@ def create(branch_name, prefix, base, remote):
     os.makedirs(worktrees_dir, exist_ok=True)
 
     # Run the command
-    print("\n🔨 Creating worktree...")
+    print("\n🔨 Creating worktree...", file=out)
     run_command(cmd, capture=False)
 
-    print(f"✅ Worktree created at {worktree_dir}")
-    print(f"   Branch: {full_branch}")
+    print(f"✅ Worktree created at {worktree_dir}", file=out)
+    print(f"   Branch: {full_branch}", file=out)
 
     # Check if gt CLI is available and track the branch (only for non-remote branches)
-    if not remote and run_command("command -v gt", check=False):
+    # Skip in hook mode — ephemeral worktrees don't need Graphite tracking
+    if not hook and not remote and run_command("command -v gt", check=False):
         # Change to worktree directory before running gt track
         os.chdir(worktree_dir)
         # Run gt track with parent set to base branch (default: main)
         run_command(f"gt track --parent {base} --quiet", capture=False, check=False)
 
-    print("   Changing directory...")
+    if hook:
+        # In hook mode, print worktree path to real stdout for Claude Code
+        print(worktree_dir, file=_real_stdout)
+    else:
+        print("   Changing directory...", file=out)
 
-    # Output cd command to fd 3 for shell to eval
-    # worktree_dir is already an absolute path from os.path.join(git_root, ...)
-    try:
-        with open("/dev/fd/3", "w") as fd3:
-            fd3.write(f"cd '{worktree_dir}'\n")
-    except (OSError, IOError):
-        # fd 3 not available, output to stderr as fallback
-        print(f"cd '{worktree_dir}'", file=sys.stderr)
+        # Output cd command to fd 3 for shell to eval
+        # worktree_dir is already an absolute path from os.path.join(git_root, ...)
+        try:
+            with open("/dev/fd/3", "w") as fd3:
+                fd3.write(f"cd '{worktree_dir}'\n")
+        except (OSError, IOError):
+            # fd 3 not available, output to stderr as fallback
+            print(f"cd '{worktree_dir}'", file=sys.stderr)
 
 
 def cleanup_derived_data(worktree_path: str) -> None:
@@ -359,7 +398,8 @@ def cleanup_derived_data(worktree_path: str) -> None:
 
 
 @cli.command()
-def cleanup():
+@click.option("--hook", is_flag=True, hidden=True, help="Hook mode for Claude Code")
+def cleanup(hook):
     """Safely delete current branch and worktree.
 
     Logic:
@@ -369,6 +409,16 @@ def cleanup():
     4. If PR is merged -> safe to delete
     5. Otherwise -> keep the branch (print reason)
     """
+    if hook:
+        # Redirect fd 1 → fd 2 at the OS level so subprocesses inherit stderr
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
+        hook_data = json.loads(sys.stdin.read())
+        worktree_path = hook_data.get("worktree_path", "")
+        if not worktree_path or not Path(worktree_path).exists():
+            sys.exit(0)
+        os.chdir(worktree_path)
+
     # Check if we're in a git repo
     if not check_git_repo():
         print("❌ Error: Not in a git repository")
@@ -386,18 +436,19 @@ def cleanup():
         sys.exit(1)
 
     # Check if we're in a worktree (not the main repo)
-    cwd = os.getcwd()
-    if "/.worktrees/" not in cwd:
-        print("❌ Cannot cleanup from main worktree")
-        print("   This command is only for cleaning up worktrees in .worktrees/")
-        sys.exit(1)
+    if not hook:
+        cwd = os.getcwd()
+        if "/.worktrees/" not in cwd:
+            print("❌ Cannot cleanup from main worktree")
+            print("   This command is only for cleaning up worktrees in .worktrees/")
+            sys.exit(1)
 
     print(f"Checking if branch '{current_branch}' can be safely deleted...")
     print()
 
     # Check for uncommitted changes (staged, unstaged, and untracked)
     status_result = run_command("git status --porcelain", check=False)
-    if status_result:  # Non-empty means there are changes
+    if status_result and not hook:  # In hook mode, skip uncommitted changes prompt
         print("⚠️  Warning: You have uncommitted changes!")
         print("   These changes will be lost if you proceed.")
         print()
@@ -419,16 +470,29 @@ def cleanup():
     if unique_commits == "0":
         print("✓ No unique commits on this branch")
         print("→ Safe to delete")
-        worktree_path = os.getcwd()
+        wt_path = os.getcwd()
         run_command("git checkout --detach origin/main", capture=False)
         run_command(f"git branch -D {current_branch}", capture=False)
         print(f"✓ Deleted branch '{current_branch}'")
-        run_command(f"git worktree remove --force {worktree_path}", capture=False)
-        print(f"✓ Deleted worktree at '{worktree_path}'")
-        cleanup_derived_data(worktree_path)
+        run_command(f"git worktree remove --force {wt_path}", capture=False)
+        print(f"✓ Deleted worktree at '{wt_path}'")
+        cleanup_derived_data(wt_path)
         sys.exit(0)
 
     print(f"Found {unique_commits} unique commit(s) on this branch")
+
+    if hook:
+        # In hook mode, skip PR check and force delete
+        print("→ Hook mode: proceeding with deletion")
+        wt_path = os.getcwd()
+        run_command("git checkout --detach origin/main", capture=False)
+        run_command(f"git branch -D {current_branch}", capture=False)
+        print(f"✓ Deleted branch '{current_branch}'")
+        run_command(f"git worktree remove --force {wt_path}", capture=False)
+        print(f"✓ Deleted worktree at '{wt_path}'")
+        cleanup_derived_data(wt_path)
+        sys.exit(0)
+
     print("Checking if associated PR has been merged...")
     print()
 
@@ -450,13 +514,13 @@ def cleanup():
             sys.exit(0)
         print()
         print("→ Proceeding with deletion")
-        worktree_path = os.getcwd()
+        wt_path = os.getcwd()
         run_command("git checkout --detach origin/main", capture=False)
         run_command(f"git branch -D {current_branch}", capture=False)
         print(f"✓ Deleted branch '{current_branch}'")
-        run_command(f"git worktree remove --force {worktree_path}", capture=False)
-        print(f"✓ Deleted worktree at '{worktree_path}'")
-        cleanup_derived_data(worktree_path)
+        run_command(f"git worktree remove --force {wt_path}", capture=False)
+        print(f"✓ Deleted worktree at '{wt_path}'")
+        cleanup_derived_data(wt_path)
         sys.exit(0)
 
     # Extract PR details
@@ -471,13 +535,13 @@ def cleanup():
 
     print(f"✓ Found merged PR #{pr_number}: {pr_title}")
     print("→ Safe to delete")
-    worktree_path = os.getcwd()
+    wt_path = os.getcwd()
     run_command("git checkout --detach origin/main", capture=False)
     run_command(f"git branch -D {current_branch}", capture=False)
     print(f"✓ Deleted branch '{current_branch}'")
-    run_command(f"git worktree remove --force {worktree_path}", capture=False)
-    print(f"✓ Deleted worktree at '{worktree_path}'")
-    cleanup_derived_data(worktree_path)
+    run_command(f"git worktree remove --force {wt_path}", capture=False)
+    print(f"✓ Deleted worktree at '{wt_path}'")
+    cleanup_derived_data(wt_path)
 
 
 @cli.command()
