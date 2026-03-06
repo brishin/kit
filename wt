@@ -332,6 +332,18 @@ def create(branch_name, prefix, base, remote, hook):
     print(f"✅ Worktree created at {worktree_dir}", file=out)
     print(f"   Branch: {full_branch}", file=out)
 
+    # Try to rename the cmux workspace to match the branch name (best-effort)
+    cmux_workspace = os.environ.get("CMUX_WORKSPACE_ID")
+    if cmux_workspace and run_command("command -v cmux", check=False):
+        # Use branch name without prefix for a cleaner sidebar label
+        # Translate dashes to spaces and title case for readability
+        label = branch_base if not remote else branch_name
+        label = label.replace("-", " ").title()
+        run_command(
+            f"cmux rename-workspace {label!r} --workspace {cmux_workspace}",
+            check=False,
+        )
+
     # Check if gt CLI is available and track the branch (only for non-remote branches)
     # Skip in hook mode — ephemeral worktrees don't need Graphite tracking
     if not hook and not remote and run_command("command -v gt", check=False):
