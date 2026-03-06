@@ -5,194 +5,197 @@
 
 set -euo pipefail
 
-# --- Test mode: auto-detect PR from current branch ---
-if [[ "${1:-}" == "--test" ]]; then
-    pr_url=$(gh pr view --json url --jq '.url' 2>/dev/null) || { echo "No PR found for current branch" >&2; exit 1; }
-    pr_number="${pr_url##*/}"
-    echo "Testing with PR: $pr_url" >&2
-else
-    # Must be running inside a cmux terminal with a live socket.
-    [[ -S "${CMUX_SOCKET_PATH:-}" ]] || exit 0
-    [[ -n "${CMUX_TAB_ID:-}" ]] || exit 0
-    [[ -n "${CMUX_PANEL_ID:-}" ]] || exit 0
-
-    payload=$(cat)
-
-    # Only care about Bash tool invocations that ran `gh pr create`.
-    command_str=$(printf '%s' "$payload" | jq -r '.tool_input.command // empty')
-    [[ "$command_str" == *"gh pr create"* ]] || exit 0
-
-    # Extract the PR URL from tool output.
-    output=$(printf '%s' "$payload" | jq -r '.tool_output // empty')
-    pr_url=$(printf '%s' "$output" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1)
-    [[ -n "$pr_url" ]] || exit 0
-
-    # Extract PR number from the URL.
-    pr_number="${pr_url##*/}"
-
-    # Send report_pr to the cmux socket (same transport priority as shell integration).
-    msg="report_pr $pr_number $pr_url --state=open --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
-
-    if command -v ncat >/dev/null 2>&1; then
-        printf '%s\n' "$msg" | ncat -w 1 -U "$CMUX_SOCKET_PATH" --send-only
-    elif command -v socat >/dev/null 2>&1; then
-        printf '%s\n' "$msg" | socat -T 1 - "UNIX-CONNECT:$CMUX_SOCKET_PATH"
-    elif command -v nc >/dev/null 2>&1; then
-        printf '%s\n' "$msg" | nc -w 1 -U "$CMUX_SOCKET_PATH"
-    fi
+# --- Shared status helpers ---
+# In test mode, print to console AND set cmux status (if available).
+# In normal mode, only set cmux status.
+TEST_MODE=false
+HAS_CMUX=false
+if command -v cmux >/dev/null 2>&1 && [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
+    HAS_CMUX=true
 fi
 
-# --- Devin Review status polling ---
-# Extract owner/repo from the PR URL.
-repo="${pr_url#https://github.com/}"
-repo="${repo%/pull/*}"
+set_status() {
+    local key="$1" label="$2" icon="$3" color="$4"
+    if $TEST_MODE; then
+        echo "$label"
+    fi
+    if $HAS_CMUX; then
+        cmux set-status "$key" "$label" --icon "$icon" --color "$color" 2>/dev/null || true
+    fi
+}
 
-# Need cmux CLI and a workspace to target.
-if command -v cmux >/dev/null 2>&1 && [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
-    status_key="devin"
+clear_status() {
+    local key="$1"
+    if $HAS_CMUX; then
+        cmux clear-status "$key" 2>/dev/null || true
+    fi
+}
 
-    # Set initial "reviewing" status.
-    cmux set-status "$status_key" "Devin: Reviewing..." \
-        --icon "eye" --color "#E3B341" 2>/dev/null || true
+# Extract repo and pr_number from a GitHub PR URL. Sets global vars.
+parse_pr_url() {
+    pr_number="${pr_url##*/}"
+    repo="${pr_url#https://github.com/}"
+    repo="${repo%/pull/*}"
+}
 
-    # Spawn detached background polling loop.
-    (
-        poll_devin_review() {
-            local sha
-            sha=$(gh api "repos/${repo}/pulls/${pr_number}" --jq '.head.sha' 2>/dev/null) || return 1
-            [[ -n "$sha" ]] || return 1
+# --- Resolve Devin Review status (synchronous, single check) ---
+resolve_devin_status() {
+    local repo="$1" pr_number="$2"
 
-            # Check commit statuses for "Devin Review" context.
-            local status_json
-            status_json=$(gh api "repos/${repo}/commits/${sha}/statuses" 2>/dev/null) || return 1
+    local sha
+    sha=$(gh api "repos/${repo}/pulls/${pr_number}" --jq '.head.sha' 2>/dev/null) || return 1
+    [[ -n "$sha" ]] || return 1
 
-            local devin_state
-            devin_state=$(printf '%s' "$status_json" | jq -r '[.[] | select(.context == "Devin Review")][0].state // empty')
+    local status_json
+    status_json=$(gh api "repos/${repo}/commits/${sha}/statuses" 2>/dev/null) || return 1
 
-            if [[ "$devin_state" == "success" ]]; then
-                # Fetch Devin's review to parse issue count.
-                local reviews issue_count
-                reviews=$(gh api "repos/${repo}/pulls/${pr_number}/reviews" 2>/dev/null) || true
+    local devin_state
+    devin_state=$(printf '%s' "$status_json" | jq -r '[.[] | select(.context == "Devin Review")][0].state // empty')
 
-                # Look for Devin's review body — match "found N potential issue" or "No Issues Found".
-                local devin_body
-                devin_body=$(printf '%s' "$reviews" | jq -r '[.[] | select(.user.login == "devin-ai-integration[bot]" or .user.login == "devin-ai[bot]")][0].body // empty')
+    if [[ -z "$devin_state" ]]; then
+        set_status devin "Devin: No status found" "questionmark.circle" "#8B8B8B"
+        return 0
+    elif [[ "$devin_state" == "pending" ]]; then
+        return 1  # Not done yet.
+    elif [[ "$devin_state" == "success" ]]; then
+        local reviews
+        reviews=$(gh api "repos/${repo}/pulls/${pr_number}/reviews" 2>/dev/null) || reviews="[]"
 
-                if [[ -z "$devin_body" ]]; then
-                    # Fallback: check all reviews for Devin-like content
-                    devin_body=$(printf '%s' "$reviews" | jq -r '[.[] | select(.body | test("Devin|devin"))][0].body // empty')
-                fi
+        # Match Devin bot by login, falling back to body content.
+        local devin_body
+        devin_body=$(printf '%s' "$reviews" | jq -r '
+            ([.[] | select(.user.login == "devin-ai-integration[bot]" or .user.login == "devin-ai[bot]")][0].body // empty)
+            | if . == "" then null else . end
+            // ([.[] | select(.body | test("Devin|devin"))][0].body // empty)
+        ')
 
-                if printf '%s' "$devin_body" | grep -qi "No Issues Found"; then
-                    cmux set-status "$status_key" "Devin: No issues" \
-                        --icon "checkmark.circle.fill" --color "#30A14E" 2>/dev/null
-                elif issue_count=$(printf '%s' "$devin_body" | grep -oiE 'found ([0-9]+) potential issue' | grep -oE '[0-9]+' | head -1) && [[ -n "$issue_count" ]]; then
-                    cmux set-status "$status_key" "Devin: ${issue_count} issue(s)" \
-                        --icon "exclamationmark.triangle.fill" --color "#E3B341" 2>/dev/null
-                else
-                    # Success but couldn't parse issue count — show generic success.
-                    cmux set-status "$status_key" "Devin: Done" \
-                        --icon "checkmark.circle.fill" --color "#30A14E" 2>/dev/null
-                fi
-                return 0
-            elif [[ "$devin_state" == "failure" || "$devin_state" == "error" ]]; then
-                cmux set-status "$status_key" "Devin: Failed" \
-                    --icon "xmark.circle.fill" --color "#F85149" 2>/dev/null
-                return 0
-            fi
+        local issue_count
+        if printf '%s' "$devin_body" | grep -qi "No Issues Found"; then
+            set_status devin "Devin: No issues" "checkmark.circle.fill" "#30A14E"
+        elif issue_count=$(printf '%s' "$devin_body" | grep -oiE 'found ([0-9]+) potential issue' | grep -oE '[0-9]+' | head -1) && [[ -n "$issue_count" ]]; then
+            set_status devin "Devin: ${issue_count} issue(s)" "exclamationmark.triangle.fill" "#E3B341"
+        else
+            set_status devin "Devin: Done" "checkmark.circle.fill" "#30A14E"
+        fi
+        return 0
+    elif [[ "$devin_state" == "failure" || "$devin_state" == "error" ]]; then
+        set_status devin "Devin: Failed" "xmark.circle.fill" "#F85149"
+        return 0
+    fi
 
-            return 1  # Not done yet.
-        }
+    return 1  # Unknown state, keep polling.
+}
 
-        # Phase 1 (0-2min): poll every 30s, 4 checks
-        for _ in $(seq 1 4); do
-            sleep 30
-            poll_devin_review && exit 0
-        done
+# --- Resolve CI Checks status (synchronous, single check) ---
+resolve_ci_status() {
+    local repo="$1" pr_number="$2"
 
-        # Phase 2 (2-8min): poll every 30s, 12 checks
-        for _ in $(seq 1 12); do
-            sleep 30
-            poll_devin_review && exit 0
-        done
+    local checks_json
+    checks_json=$(gh pr checks "$pr_number" --repo "$repo" --json bucket,name 2>/dev/null) || return 1
 
-        # Phase 3 (8-15min): poll every 60s, 7 checks
-        for _ in $(seq 1 7); do
-            sleep 60
-            poll_devin_review && exit 0
-        done
+    # Parse all counts in a single jq invocation.
+    local counts
+    counts=$(printf '%s' "$checks_json" | jq -r '[length, ([.[]|select(.bucket=="pending")]|length), ([.[]|select(.bucket=="fail")]|length), ([.[]|select(.bucket=="cancel")]|length)] | join(" ")')
+    local total pending failed cancelled
+    read -r total pending failed cancelled <<< "$counts"
 
-        # Timed out.
-        cmux set-status "$status_key" "Devin: Timed out" \
-            --icon "questionmark.circle" --color "#8B8B8B" 2>/dev/null
-    ) &>/dev/null &
+    if [[ "$total" == "0" ]]; then
+        clear_status ci
+        if $TEST_MODE; then echo "CI: No checks"; fi
+        return 0
+    fi
+
+    [[ "$pending" == "0" ]] || return 1
+
+    if [[ "$failed" != "0" ]]; then
+        set_status ci "CI: ${failed} failed" "xmark.circle.fill" "#F85149"
+    elif [[ "$cancelled" != "0" ]]; then
+        set_status ci "CI: Cancelled" "xmark.circle" "#8B8B8B"
+    else
+        set_status ci "CI: Passed" "checkmark.circle.fill" "#30A14E"
+    fi
+    return 0
+}
+
+# --- Generic polling loop: poll a resolve function with backoff ---
+poll_until_resolved() {
+    local resolve_fn="$1" key="$2" label="$3" repo="$4" pr_number="$5"
+    set +e  # Don't let uncaught failures kill the poller silently.
+
+    # Phase 1 (0-8min): poll every 30s, 16 checks
+    for _ in $(seq 1 16); do
+        sleep 30
+        "$resolve_fn" "$repo" "$pr_number" && exit 0
+    done
+
+    # Phase 2 (8-15min): poll every 60s, 7 checks
+    for _ in $(seq 1 7); do
+        sleep 60
+        "$resolve_fn" "$repo" "$pr_number" && exit 0
+    done
+
+    # Timed out.
+    set_status "$key" "${label}: Timed out" "questionmark.circle" "#8B8B8B"
+}
+
+# --- Test mode: resolve status immediately and exit ---
+if [[ "${1:-}" == "--test" ]]; then
+    TEST_MODE=true
+    if [[ -n "${2:-}" ]]; then
+        pr_url="$2"
+    else
+        pr_url=$(gh pr view --json url --jq '.url' 2>/dev/null) || { echo "No PR found for current branch" >&2; exit 1; }
+    fi
+    parse_pr_url
+
+    echo "Testing with PR: $pr_url"
+    echo ""
+
+    # Resolve both in parallel.
+    (resolve_devin_status "$repo" "$pr_number" || echo "Devin: Pending...") &
+    (resolve_ci_status "$repo" "$pr_number" || echo "CI: Pending...") &
+    wait
+    exit 0
+fi
+
+# --- Normal mode: PostToolUse hook ---
+# Must be running inside a cmux terminal with a live socket.
+[[ -S "${CMUX_SOCKET_PATH:-}" ]] || exit 0
+[[ -n "${CMUX_TAB_ID:-}" ]] || exit 0
+[[ -n "${CMUX_PANEL_ID:-}" ]] || exit 0
+
+payload=$(cat)
+
+# Only care about Bash tool invocations that ran `gh pr create`.
+command_str=$(printf '%s' "$payload" | jq -r '.tool_input.command // empty')
+[[ "$command_str" == *"gh pr create"* ]] || exit 0
+
+# Extract the PR URL from tool output.
+output=$(printf '%s' "$payload" | jq -r '.tool_output // empty')
+pr_url=$(printf '%s' "$output" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1)
+[[ -n "$pr_url" ]] || exit 0
+parse_pr_url
+
+# Send report_pr to the cmux socket (same transport priority as shell integration).
+msg="report_pr $pr_number $pr_url --state=open --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+
+if command -v ncat >/dev/null 2>&1; then
+    printf '%s\n' "$msg" | ncat -w 1 -U "$CMUX_SOCKET_PATH" --send-only
+elif command -v socat >/dev/null 2>&1; then
+    printf '%s\n' "$msg" | socat -T 1 - "UNIX-CONNECT:$CMUX_SOCKET_PATH"
+elif command -v nc >/dev/null 2>&1; then
+    printf '%s\n' "$msg" | nc -w 1 -U "$CMUX_SOCKET_PATH"
+fi
+
+# --- Background status polling ---
+if $HAS_CMUX; then
+    # Set initial statuses.
+    set_status devin "Devin: Reviewing..." "eye" "#E3B341"
+    set_status ci "CI: Running..." "hammer" "#E3B341"
+
+    ( poll_until_resolved resolve_devin_status devin "Devin" "$repo" "$pr_number" ) &>/dev/null &
     disown
-
-    # --- CI Checks polling ---
-    cmux set-status ci "CI: Running..." \
-        --icon "hammer" --color "#E3B341" 2>/dev/null || true
-
-    (
-        poll_ci_checks() {
-            local checks_json
-            checks_json=$(gh pr checks "$pr_number" --repo "$repo" --json bucket,name 2>/dev/null) || return 1
-
-            # No checks configured — clear status and exit.
-            local count
-            count=$(printf '%s' "$checks_json" | jq 'length')
-            if [[ "$count" == "0" ]]; then
-                cmux clear-status ci 2>/dev/null
-                return 0
-            fi
-
-            # Still pending?
-            local pending
-            pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "pending")] | length')
-            [[ "$pending" == "0" ]] || return 1
-
-            # All done — check results.
-            local failed
-            failed=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "fail")] | length')
-
-            if [[ "$failed" != "0" ]]; then
-                cmux set-status ci "CI: ${failed} failed" \
-                    --icon "xmark.circle.fill" --color "#F85149" 2>/dev/null
-            else
-                local cancelled
-                cancelled=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "cancel")] | length')
-                if [[ "$cancelled" != "0" ]]; then
-                    cmux set-status ci "CI: Cancelled" \
-                        --icon "xmark.circle" --color "#8B8B8B" 2>/dev/null
-                else
-                    cmux set-status ci "CI: Passed" \
-                        --icon "checkmark.circle.fill" --color "#30A14E" 2>/dev/null
-                fi
-            fi
-            return 0
-        }
-
-        # Phase 1 (0-2min): poll every 30s, 4 checks
-        for _ in $(seq 1 4); do
-            sleep 30
-            poll_ci_checks && exit 0
-        done
-
-        # Phase 2 (2-8min): poll every 30s, 12 checks
-        for _ in $(seq 1 12); do
-            sleep 30
-            poll_ci_checks && exit 0
-        done
-
-        # Phase 3 (8-15min): poll every 60s, 7 checks
-        for _ in $(seq 1 7); do
-            sleep 60
-            poll_ci_checks && exit 0
-        done
-
-        # Timed out.
-        cmux set-status ci "CI: Timed out" \
-            --icon "questionmark.circle" --color "#8B8B8B" 2>/dev/null
-    ) &>/dev/null &
+    ( poll_until_resolved resolve_ci_status ci "CI" "$repo" "$pr_number" ) &>/dev/null &
     disown
 fi
 
