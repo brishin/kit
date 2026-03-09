@@ -9,6 +9,7 @@ set -euo pipefail
 # In test mode, print to console AND set cmux status (if available).
 # In normal mode, only set cmux status.
 TEST_MODE=false
+POLL_MODE=false
 HAS_CMUX=false
 if command -v cmux >/dev/null 2>&1 && [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
     HAS_CMUX=true
@@ -16,7 +17,7 @@ fi
 
 set_status() {
     local key="$1" label="$2" icon="$3" color="$4"
-    if $TEST_MODE; then
+    if $TEST_MODE || $POLL_MODE; then
         echo "$label"
     fi
     if $HAS_CMUX; then
@@ -73,7 +74,8 @@ resolve_devin_status() {
         if printf '%s' "$devin_body" | grep -qi "No Issues Found"; then
             set_status devin "Devin: No issues" "checkmark.circle.fill" "#30A14E"
         elif issue_count=$(printf '%s' "$devin_body" | grep -oiE 'found ([0-9]+) potential issue' | grep -oE '[0-9]+' | head -1) && [[ -n "$issue_count" ]]; then
-            set_status devin "Devin: ${issue_count} issue(s)" "exclamationmark.triangle.fill" "#E3B341"
+            local noun="issues"; [[ "$issue_count" == "1" ]] && noun="issue"
+            set_status devin "Devin: ${issue_count} ${noun}" "exclamationmark.triangle.fill" "#E3B341"
         else
             set_status devin "Devin: Done" "checkmark.circle.fill" "#30A14E"
         fi
@@ -158,6 +160,18 @@ if [[ "${1:-}" == "--test" ]]; then
     exit 0
 fi
 
+# --- Poll mode: run pollers in foreground (launched in cmux pane) ---
+if [[ "${1:-}" == "--poll" ]]; then
+    POLL_MODE=true
+    repo="$2" pr_number="$3"
+    echo "Polling PR #${pr_number} (${repo})..."
+    echo ""
+    ( poll_until_resolved resolve_devin_status devin "Devin" "$repo" "$pr_number" ) &
+    ( poll_until_resolved resolve_ci_status ci "CI" "$repo" "$pr_number" ) &
+    wait
+    exit 0
+fi
+
 # --- Normal mode: PostToolUse hook ---
 # Must be running inside a cmux terminal with a live socket.
 [[ -S "${CMUX_SOCKET_PATH:-}" ]] || exit 0
@@ -166,25 +180,32 @@ fi
 
 payload=$(cat)
 
-# Only care about Bash tool invocations that ran `gh pr create`.
 command_str=$(printf '%s' "$payload" | jq -r '.tool_input.command // empty')
-[[ "$command_str" == *"gh pr create"* ]] || exit 0
 
-# Extract the PR URL from tool output.
-output=$(printf '%s' "$payload" | jq -r '.tool_output // empty')
-pr_url=$(printf '%s' "$output" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1)
-[[ -n "$pr_url" ]] || exit 0
-parse_pr_url
+if [[ "$command_str" == *"gh pr create"* ]]; then
+    # Extract the PR URL from tool output.
+    output=$(printf '%s' "$payload" | jq -r '.tool_output // empty')
+    pr_url=$(printf '%s' "$output" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1)
+    [[ -n "$pr_url" ]] || exit 0
+    parse_pr_url
 
-# Send report_pr to the cmux socket (same transport priority as shell integration).
-msg="report_pr $pr_number $pr_url --state=open --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    # Send report_pr to the cmux socket (same transport priority as shell integration).
+    msg="report_pr $pr_number $pr_url --state=open --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
 
-if command -v ncat >/dev/null 2>&1; then
-    printf '%s\n' "$msg" | ncat -w 1 -U "$CMUX_SOCKET_PATH" --send-only
-elif command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$msg" | socat -T 1 - "UNIX-CONNECT:$CMUX_SOCKET_PATH"
-elif command -v nc >/dev/null 2>&1; then
-    printf '%s\n' "$msg" | nc -w 1 -U "$CMUX_SOCKET_PATH"
+    if command -v ncat >/dev/null 2>&1; then
+        printf '%s\n' "$msg" | ncat -w 1 -U "$CMUX_SOCKET_PATH" --send-only
+    elif command -v socat >/dev/null 2>&1; then
+        printf '%s\n' "$msg" | socat -T 1 - "UNIX-CONNECT:$CMUX_SOCKET_PATH"
+    elif command -v nc >/dev/null 2>&1; then
+        printf '%s\n' "$msg" | nc -w 1 -U "$CMUX_SOCKET_PATH"
+    fi
+elif [[ "$command_str" == *"git push"* ]]; then
+    # Look up existing PR for current branch after a push/force-push.
+    pr_url=$(gh pr view --json url --jq '.url' 2>/dev/null) || exit 0
+    [[ -n "$pr_url" ]] || exit 0
+    parse_pr_url
+else
+    exit 0
 fi
 
 # --- Background status polling ---
@@ -193,10 +214,20 @@ if $HAS_CMUX; then
     set_status devin "Devin: Reviewing..." "eye" "#E3B341"
     set_status ci "CI: Running..." "hammer" "#E3B341"
 
-    ( poll_until_resolved resolve_devin_status devin "Devin" "$repo" "$pr_number" ) &>/dev/null &
-    disown
-    ( poll_until_resolved resolve_ci_status ci "CI" "$repo" "$pr_number" ) &>/dev/null &
-    disown
+    # Run pollers in a visible cmux pane; fall back to background processes.
+    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    # cmux new-pane returns: OK surface:<N> pane:<N> workspace:<N>
+    pane_result=$(cmux new-pane 2>/dev/null) || pane_result=""
+    if [[ "$pane_result" == OK* ]]; then
+        surface_ref=$(echo "$pane_result" | awk '{print $2}')
+        cmux send --surface "$surface_ref" "'$script_path' --poll '$repo' '$pr_number'"
+        cmux send-key --surface "$surface_ref" Enter
+    else
+        ( poll_until_resolved resolve_devin_status devin "Devin" "$repo" "$pr_number" ) &>/dev/null &
+        disown
+        ( poll_until_resolved resolve_ci_status ci "CI" "$repo" "$pr_number" ) &>/dev/null &
+        disown
+    fi
 fi
 
 exit 0
