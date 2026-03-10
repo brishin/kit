@@ -173,6 +173,8 @@ if [[ "${1:-}" == "--poll" ]]; then
 fi
 
 # --- Normal mode: PostToolUse hook ---
+set +eo pipefail  # Fire-and-forget: don't let failures kill the hook.
+
 # Must be running inside a cmux terminal with a live socket.
 [[ -S "${CMUX_SOCKET_PATH:-}" ]] || exit 0
 [[ -n "${CMUX_TAB_ID:-}" ]] || exit 0
