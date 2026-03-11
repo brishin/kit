@@ -17,6 +17,10 @@ Setup: Add these aliases to your ~/.bashrc or ~/.zshrc:
 Usage:
   wt create <branch-name>   Create a git worktree with standardized naming
   wt cleanup                Safely delete current branch and worktree
+  wt stash                  Archive current worktree as a custom ref
+  wt stash list             List stashed branches
+  wt stash pop <name>       Restore a stashed branch to a new worktree
+  wt stash drop <name>      Delete a stashed branch ref
   wt reuse [branch-name]    Reuse current worktree for a new branch
   wt root                   Navigate to git root directory
 """
@@ -87,6 +91,7 @@ class AliasedGroup(click.Group):
     aliases = {
         "c": "create",
         "cl": "cleanup",
+        "s": "stash",
     }
 
     def get_command(self, ctx, cmd_name):
@@ -554,6 +559,197 @@ def cleanup(hook):
     run_command(f"git worktree remove --force {wt_path}", capture=False)
     print(f"✓ Deleted worktree at '{wt_path}'")
     cleanup_derived_data(wt_path)
+
+
+def _stash_current():
+    """Archive the current worktree's branch as a custom ref and remove the worktree."""
+    if not check_git_repo():
+        print("❌ Error: Not in a git repository")
+        sys.exit(1)
+
+    current_branch = run_command("git rev-parse --abbrev-ref HEAD")
+    if not current_branch:
+        print("❌ Error: Could not determine current branch")
+        sys.exit(1)
+
+    if current_branch in ["main", "master"]:
+        print("❌ Cannot stash main/master branch")
+        sys.exit(1)
+
+    wt_path = os.getcwd()
+    if "/.worktrees/" not in wt_path:
+        print("❌ Cannot stash from main worktree")
+        print("   This command is only for stashing worktrees in .worktrees/")
+        sys.exit(1)
+
+    # Check for uncommitted changes
+    status_result = run_command("git status --porcelain", check=False)
+    if status_result:
+        print("⚠️  Warning: You have uncommitted changes!")
+        print("   These changes will be lost if you proceed.")
+        print()
+        continue_stash = questionary.confirm(
+            "Continue with stash?", default=False
+        ).ask()
+        if not continue_stash:
+            print("Aborted.")
+            sys.exit(0)
+        print()
+
+    # Check if ref already exists
+    ref_name = f"refs/stashed/{current_branch}"
+    existing_ref = run_command(f"git rev-parse --verify {ref_name}", check=False)
+    if existing_ref:
+        print(f"⚠️  A stash already exists for '{current_branch}'")
+        print(f"   Existing ref points to {existing_ref[:8]}")
+        overwrite = questionary.confirm(
+            "Overwrite existing stash?", default=False
+        ).ask()
+        if not overwrite:
+            print("Aborted.")
+            sys.exit(0)
+        print()
+
+    # Get commit SHA
+    sha = run_command("git rev-parse HEAD")
+    if not sha:
+        print("❌ Error: Could not determine HEAD commit")
+        sys.exit(1)
+
+    # Create ref first (before any destructive ops)
+    run_command(f"git update-ref {ref_name} {sha}")
+    print(f"✓ Created ref {ref_name} -> {sha[:8]}")
+
+    # Teardown: detach HEAD, delete branch, remove worktree, cleanup derived data
+    run_command("git checkout --detach HEAD", capture=False)
+    run_command(f"git branch -D {current_branch}", capture=False)
+    print(f"✓ Deleted branch '{current_branch}'")
+    run_command(f"git worktree remove --force {wt_path}", capture=False)
+    print(f"✓ Removed worktree at '{wt_path}'")
+    cleanup_derived_data(wt_path)
+
+    print()
+    print(f"✅ Stashed '{current_branch}'")
+    print(f"   Restore with: wt stash pop {current_branch}")
+
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def stash(ctx):
+    """Archive current worktree, or manage stashed branches."""
+    if ctx.invoked_subcommand is None:
+        _stash_current()
+
+
+@stash.command("list")
+def stash_list():
+    """List all stashed branches."""
+    result = run_command(
+        "git for-each-ref --sort=-committerdate "
+        "--format='%(refname:strip=2)%09%(committerdate:relative)%09%(subject)' "
+        "refs/stashed/",
+        check=False,
+    )
+    if not result:
+        print("No stashed branches.")
+        return
+
+    print("Stashed branches:")
+    print()
+    for line in result.splitlines():
+        parts = line.split("\t")
+        name = parts[0]
+        date = parts[1] if len(parts) > 1 else ""
+        subject = parts[2] if len(parts) > 2 else ""
+        print(f"  {name}  ({date}) {subject}")
+
+
+@stash.command()
+@click.argument("name")
+def pop(name):
+    """Restore a stashed branch to a new worktree."""
+    ref_name = f"refs/stashed/{name}"
+    sha = run_command(f"git rev-parse --verify {ref_name}", check=False)
+    if not sha:
+        print(f"❌ No stash found for '{name}'")
+        print()
+        # List available stashes
+        available = run_command(
+            "git for-each-ref --format='%(refname:strip=2)' refs/stashed/",
+            check=False,
+        )
+        if available:
+            print("Available stashes:")
+            for line in available.splitlines():
+                print(f"  {line}")
+        else:
+            print("No stashed branches.")
+        sys.exit(1)
+
+    # Check branch doesn't already exist
+    if run_command(f"git rev-parse --verify refs/heads/{name}", check=False):
+        print(f"❌ Branch '{name}' already exists locally")
+        sys.exit(1)
+
+    # Derive worktree directory
+    git_common_dir = run_command("git rev-parse --git-common-dir")
+    if not git_common_dir:
+        print("❌ Error: Could not determine git directory")
+        sys.exit(1)
+    git_root = str(Path(git_common_dir).parent.resolve())
+
+    dir_name = name.replace("/", "-")
+    worktree_dir = os.path.join(git_root, ".worktrees", dir_name)
+
+    if Path(worktree_dir).exists():
+        print(f"❌ Worktree directory already exists: {worktree_dir}")
+        sys.exit(1)
+
+    # Create .worktrees directory if needed
+    os.makedirs(os.path.join(git_root, ".worktrees"), exist_ok=True)
+
+    # Create worktree with new branch at the stashed commit
+    run_command(f"git worktree add -b {name} {worktree_dir} {sha}", capture=False)
+
+    # Delete the stash ref
+    run_command(f"git update-ref -d {ref_name}")
+
+    print(f"✅ Restored '{name}' to {worktree_dir}")
+    print(f"   Stash ref removed.")
+
+    # cd to new worktree via fd 3
+    try:
+        with open("/dev/fd/3", "w") as fd3:
+            fd3.write(f"cd '{worktree_dir}'\n")
+    except (OSError, IOError):
+        print(f"cd '{worktree_dir}'", file=sys.stderr)
+
+
+@stash.command()
+@click.argument("name")
+def drop(name):
+    """Delete a stashed branch ref."""
+    ref_name = f"refs/stashed/{name}"
+    sha = run_command(f"git rev-parse --verify {ref_name}", check=False)
+    if not sha:
+        print(f"❌ No stash found for '{name}'")
+        sys.exit(1)
+
+    # Show commit info
+    commit_info = run_command(f"git log -1 --oneline {sha}", check=False)
+    print(f"Stash: {name}")
+    print(f"  Commit: {commit_info}")
+    print()
+
+    confirm = questionary.confirm(
+        "Drop this stash? (commit will become unreachable)", default=False
+    ).ask()
+    if not confirm:
+        print("Aborted.")
+        sys.exit(0)
+
+    run_command(f"git update-ref -d {ref_name}")
+    print(f"✓ Dropped stash '{name}'")
 
 
 @cli.command()
