@@ -12,7 +12,7 @@
       "name": "kit",
       "source": "./",
       "description": "Web research skill for gathering technical information, best practices, and current documentation from the web, plus git worktree management utilities",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "brian"
       },

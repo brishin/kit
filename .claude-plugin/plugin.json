@@ -1,6 +1,6 @@
 {
   "name": "kit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Web research skill for gathering technical information from the web, plus git worktree management utilities",
   "author": {
     "name": "brian"
