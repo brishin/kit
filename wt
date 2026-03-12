@@ -120,7 +120,8 @@ def cli():
     "--remote", "-r", is_flag=True, help="Create worktree from existing remote branch"
 )
 @click.option("--hook", is_flag=True, hidden=True, help="Hook mode for Claude Code")
-def create(branch_name, prefix, base, remote, hook):
+@click.option("--no-cl", is_flag=True, help="Don't launch Claude Code after creating worktree")
+def create(branch_name, prefix, base, remote, hook, no_cl):
     """Create a git worktree with standardized naming.
 
     Example: wt create resend-email
@@ -368,6 +369,8 @@ def create(branch_name, prefix, base, remote, hook):
         try:
             with open("/dev/fd/3", "w") as fd3:
                 fd3.write(f"cd '{worktree_dir}'\n")
+                if not no_cl:
+                    fd3.write("cl\n")
         except (OSError, IOError):
             # fd 3 not available, output to stderr as fallback
             print(f"cd '{worktree_dir}'", file=sys.stderr)
