@@ -45,7 +45,7 @@ Launch a **background** general-purpose agent to run the polling script:
 Agent(
   description: "Poll PR status",
   prompt: "Run this command and report the final results:
-    /Users/brian/Programming/kit/skills/watch-pr/scripts/poll-pr-status <owner/repo> <pr_number>
+    /Users/brian/Programming/kit/skills/watch-pr/scripts/poll-pr-status.py <owner/repo> <pr_number>
     This polls Devin review and CI checks for ~15 minutes. When it finishes, summarize the final status of both Devin and CI.",
   subagent_type: "general-purpose",
   run_in_background: true
@@ -57,18 +57,21 @@ Tell the user monitoring is active. They'll be notified when the background agen
 
 # Polling Strategy
 The `poll-pr-status` script runs two parallel pollers (Devin + CI):
+- **Immediate first check** for fast returns when statuses are already resolved
+- **3-minute grace period**: after launch, "no status"/"no checks" and completed-but-never-seen-pending results are treated as potentially stale (keeps polling). Prevents returning old CI results after a fresh push
 - **Phase 1** (0–8 min): every 30s, 16 checks
 - **Phase 2** (8–15 min): every 60s, 7 checks
 - Updates cmux sidebar throughout; prints details on issues/failures
+- Test mode (`--test`) skips the grace period for immediate resolution
 
 # Quick Reference
 ```bash
 # Standalone test (immediate, no polling)
-skills/watch-pr/scripts/poll-pr-status --test
-skills/watch-pr/scripts/poll-pr-status --test https://github.com/owner/repo/pull/123
+skills/watch-pr/scripts/poll-pr-status.py --test
+skills/watch-pr/scripts/poll-pr-status.py --test https://github.com/owner/repo/pull/123
 
 # Full poll
-skills/watch-pr/scripts/poll-pr-status owner/repo 123
+skills/watch-pr/scripts/poll-pr-status.py owner/repo 123
 ```
 
 # Example
