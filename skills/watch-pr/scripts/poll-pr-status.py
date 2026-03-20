@@ -4,8 +4,14 @@
 # ///
 """Poll Devin review and CI check status for a GitHub PR.
 
-Usage: poll-pr-status <owner/repo> <pr_number>
+Usage: poll-pr-status [options]
+       poll-pr-status <owner/repo> <pr_number>
        poll-pr-status --test [pr_url]
+
+Options:
+  --report-cmux    Report PR to cmux socket (for newly created PRs)
+
+When called with no positional args, auto-detects the PR from the current branch.
 
 Originally extracted from the cmux-pr-detect PostToolUse hook (now removed). This is the standalone polling
 script invoked by the watch-pr skill via a background agent.
@@ -23,18 +29,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
-# --- Grace period tracking ---
-
-
 @dataclass
 class GraceContext:
-    """Tracks grace period and whether we've seen a pending state.
-
-    After a push, old CI results may still be visible. The grace period
-    prevents treating stale completed results as genuine. Once we observe
-    a pending state, we know the new run has started and subsequent
-    resolution is trustworthy.
-    """
+    """Tracks grace period to avoid treating stale results as genuine after a push."""
 
     start: float = field(default_factory=time.monotonic)
     grace_seconds: int = 180
@@ -45,14 +42,9 @@ class GraceContext:
         return time.monotonic() - self.start < self.grace_seconds
 
 
-# --- Environment detection ---
-
 HAS_CMUX = bool(
     shutil.which("cmux") and os.environ.get("CMUX_WORKSPACE_ID")
 )
-
-
-# --- Status helpers ---
 
 
 def set_status(key: str, label: str, icon: str, color: str) -> None:
@@ -69,23 +61,15 @@ def clear_status(key: str) -> None:
         subprocess.run(["cmux", "clear-status", key], capture_output=True)
 
 
-# --- URL parsing ---
-
-
 def parse_pr_url(url: str) -> tuple[str, str]:
     """Extract (owner/repo, pr_number) from a GitHub PR URL."""
     pr_number = url.rstrip("/").rsplit("/", 1)[-1]
-    # Remove https://github.com/ prefix and /pull/N suffix
     repo = re.sub(r"^https://github\.com/", "", url)
     repo = re.sub(r"/pull/\d+$", "", repo)
     return repo, pr_number
 
 
-# --- GitHub API helpers ---
-
-
 def gh_api(endpoint: str, *, jq: str | None = None) -> str | None:
-    """Call gh api and return stdout, or None on failure."""
     cmd = ["gh", "api", endpoint]
     if jq:
         cmd += ["--jq", jq]
@@ -97,7 +81,6 @@ def gh_api(endpoint: str, *, jq: str | None = None) -> str | None:
 
 
 def gh_pr_checks(pr_number: str, repo: str) -> str | None:
-    """Call gh pr checks and return JSON stdout, or None on failure."""
     result = subprocess.run(
         ["gh", "pr", "checks", pr_number, "--repo", repo, "--json", "bucket,name"],
         capture_output=True,
@@ -107,10 +90,6 @@ def gh_pr_checks(pr_number: str, repo: str) -> str | None:
         print(f"gh pr checks failed: {result.stderr.strip()}", file=sys.stderr)
         return None
     return result.stdout
-
-
-# --- Resolve functions ---
-# Return True if resolved (terminal state), False if still pending.
 
 
 def resolve_devin_status(
@@ -130,9 +109,7 @@ def resolve_devin_status(
     devin_state = devin_state.strip() or None
 
     if not devin_state:
-        # No status found.
         if grace_ctx and grace_ctx.within_grace:
-            # Might not have started yet — keep polling.
             return False
         set_status("devin", "Devin: No status found", "questionmark.circle", "#8B8B8B")
         return True
@@ -142,8 +119,6 @@ def resolve_devin_status(
             grace_ctx.seen_pending = True
         return False
 
-    # We have a definitive result (success/failure/error).
-    # If we never saw pending and we're within grace, this might be stale.
     if grace_ctx and not grace_ctx.seen_pending and grace_ctx.within_grace:
         return False
 
@@ -151,7 +126,6 @@ def resolve_devin_status(
         reviews_result = gh_api(f"repos/{repo}/pulls/{pr_number}/reviews")
         reviews = json.loads(reviews_result) if reviews_result else []
 
-        # Find Devin's review body.
         devin_body = None
         for r in reviews:
             login = r.get("user", {}).get("login", "")
@@ -195,7 +169,6 @@ def resolve_devin_status(
         set_status("devin", "Devin: Failed", "xmark.circle.fill", "#F85149")
         return True
 
-    # Unknown state — keep polling.
     return False
 
 
@@ -220,7 +193,6 @@ def resolve_ci_status(
 
     if total == 0:
         if grace_ctx and grace_ctx.within_grace:
-            # No checks yet — new commit might not have triggered CI.
             return False
         clear_status("ci")
         print("CI: No checks")
@@ -231,7 +203,6 @@ def resolve_ci_status(
             grace_ctx.seen_pending = True
         return False
 
-    # All checks complete. If we never saw pending and within grace, might be stale.
     if grace_ctx and not grace_ctx.seen_pending and grace_ctx.within_grace:
         return False
 
@@ -249,8 +220,6 @@ def resolve_ci_status(
     return True
 
 
-# --- Polling loop ---
-
 ResolveFunc = Callable[[str, str], bool]
 
 
@@ -262,56 +231,97 @@ def poll_until_resolved(
     pr_number: str,
     grace_ctx: GraceContext,
 ) -> None:
-    """Poll a resolve function with two-phase backoff.
-
-    Performs an immediate first check, then:
-    - Phase 1 (0–8 min): every 30s, 16 checks
-    - Phase 2 (8–15 min): every 60s, 7 checks
-    """
-    # Immediate first check — fast return when statuses are already resolved.
+    """Poll with two-phase backoff: 30s x16, then 60s x7."""
     if resolve_fn(repo, pr_number, grace_ctx=grace_ctx):
         return
 
-    # Phase 1: 30s intervals
     for _ in range(16):
         time.sleep(30)
         if resolve_fn(repo, pr_number, grace_ctx=grace_ctx):
             return
 
-    # Phase 2: 60s intervals
     for _ in range(7):
         time.sleep(60)
         if resolve_fn(repo, pr_number, grace_ctx=grace_ctx):
             return
 
-    # Timed out.
     set_status(key, f"{label}: Timed out", "questionmark.circle", "#8B8B8B")
 
 
-# --- Main ---
+def detect_pr() -> tuple[str, str, str]:
+    """Detect (repo, pr_number, pr_url) from the current branch."""
+    result = subprocess.run(
+        [
+            "gh", "pr", "view",
+            "--json", "url,number,headRefName",
+            "-q", ".url + \" \" + (.number | tostring)",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("No PR found for current branch", file=sys.stderr)
+        sys.exit(1)
+    parts = result.stdout.strip().split(" ", 1)
+    pr_url = parts[0]
+    pr_number = parts[1]
+    repo, _ = parse_pr_url(pr_url)
+    return repo, pr_number, pr_url
+
+
+def report_pr_to_cmux(pr_number: str, pr_url: str) -> None:
+    """Report PR to cmux socket."""
+    socket_path = os.environ.get("CMUX_SOCKET_PATH")
+    tab_id = os.environ.get("CMUX_TAB_ID")
+    panel_id = os.environ.get("CMUX_PANEL_ID")
+
+    if not socket_path:
+        print("No CMUX_SOCKET_PATH set, skipping cmux report")
+        return
+
+    msg = f"report_pr {pr_number} {pr_url} --state=open"
+    if tab_id:
+        msg += f" --tab={tab_id}"
+    if panel_id:
+        msg += f" --panel={panel_id}"
+
+    for tool in ("ncat", "socat", "nc"):
+        if not shutil.which(tool):
+            continue
+        if tool == "ncat":
+            cmd = f"printf '%s\\n' \"{msg}\" | ncat -w 1 -U \"{socket_path}\" --send-only"
+        elif tool == "socat":
+            cmd = f"printf '%s\\n' \"{msg}\" | socat -T 1 - \"UNIX-CONNECT:{socket_path}\""
+        else:
+            cmd = f"printf '%s\\n' \"{msg}\" | nc -w 1 -U \"{socket_path}\""
+        subprocess.run(cmd, shell=True, capture_output=True)
+        print("Reported PR to cmux")
+        return
+
+    print("No socket transport available (ncat/socat/nc)", file=sys.stderr)
+
+
+def set_initial_statuses() -> None:
+    set_status("devin", "Devin: Reviewing...", "eye", "#E3B341")
+    set_status("ci", "CI: Running...", "hammer", "#E3B341")
 
 
 def main() -> None:
-    # Test mode: resolve status immediately, no polling or grace period.
-    if len(sys.argv) >= 2 and sys.argv[1] == "--test":
-        if len(sys.argv) >= 3:
-            pr_url = sys.argv[2]
-        else:
-            result = subprocess.run(
-                ["gh", "pr", "view", "--json", "url", "--jq", ".url"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print("No PR found for current branch", file=sys.stderr)
-                sys.exit(1)
-            pr_url = result.stdout.strip()
+    args = sys.argv[1:]
+    report_cmux = "--report-cmux" in args
+    test_mode = "--test" in args
+    positional = [a for a in args if not a.startswith("--")]
 
-        repo, pr_number = parse_pr_url(pr_url)
+    if test_mode:
+        if positional:
+            pr_url = positional[0]
+            repo, pr_number = parse_pr_url(pr_url)
+        else:
+            repo, pr_number, pr_url = detect_pr()
+
         print(f"Testing with PR: {pr_url}")
         print()
 
-        # Resolve both in parallel, no grace period.
         def test_devin() -> None:
             if not resolve_devin_status(repo, pr_number, grace_ctx=None):
                 print("Devin: Pending...")
@@ -328,20 +338,26 @@ def main() -> None:
         t2.join()
         return
 
-    # Poll mode.
-    if len(sys.argv) < 3:
+    if len(positional) >= 2:
+        repo, pr_number = positional[0], positional[1]
+        pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+    elif len(positional) == 0:
+        repo, pr_number, pr_url = detect_pr()
+    else:
         print(
-            "Usage: poll-pr-status <owner/repo> <pr_number>\n"
+            "Usage: poll-pr-status [--report-cmux] [owner/repo pr_number]\n"
             "       poll-pr-status --test [pr_url]",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    repo, pr_number = sys.argv[1], sys.argv[2]
+    if report_cmux:
+        report_pr_to_cmux(pr_number, pr_url)
+    set_initial_statuses()
+
     print(f"Polling PR #{pr_number} ({repo})...")
     print()
 
-    # Each poller gets its own grace context (independent seen_pending tracking).
     devin_grace = GraceContext()
     ci_grace = GraceContext()
 
