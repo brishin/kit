@@ -322,7 +322,7 @@ def create(branch_name, prefix, base, remote, hook, no_cl):
 
                 print(f"✓ Found remote branch: origin/{base}", file=out)
                 # Use origin/{base} as the starting point
-                cmd = f"git worktree add -B {full_branch} {worktree_dir} origin/{base}"
+                cmd = f"git worktree add --no-track -B {full_branch} {worktree_dir} origin/{base}"
             else:
                 # Create new branch based on local base branch
                 cmd = f"git worktree add -B {full_branch} {worktree_dir} {base}"
