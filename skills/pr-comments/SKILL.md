@@ -1,8 +1,8 @@
 ---
-name: "PR Comments"
+name: "pr-comments"
 description: "Fetch and analyze review comments from GitHub PRs. Use when reviewing PR feedback, addressing reviewer requests, or summarizing PR discussion."
 allowed-tools: [Bash]
-version: "1.0.0"
+version: "1.1.0"
 ---
 
 # Workflow

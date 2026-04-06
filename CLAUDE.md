@@ -22,7 +22,7 @@ Add this repository as a Claude Code marketplace via `/plugin`.
 
 **Skill Generator**: Generate new Claude Code skills following best practices. Invoked when creating skills or learning skill architecture. Includes progressive loading optimization, security via allowed-tools, multi-file skill patterns, performance budgets, validation checklists, and quick-start templates.
 
-**PR Comments**: Fetch and analyze human review comments from GitHub PRs. Filters out bot comments and provides structured summaries of reviewer feedback, action items, and discussion themes. Uses a Python script for reliable comment fetching and filtering.
+**pr-comments**: Fetch and analyze human review comments from GitHub PRs. Filters out bot comments and provides structured summaries of reviewer feedback, action items, and discussion themes. Uses a Python script for reliable comment fetching and filtering.
 
 **Watch PR**: Monitor PR status by polling Devin review and CI checks, updating cmux sidebar indicators. Use after creating a PR or pushing to a branch with an open PR. Launches a background agent that polls for up to 15 minutes.
 
