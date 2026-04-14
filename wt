@@ -28,6 +28,7 @@ Usage:
 import json
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -363,6 +364,39 @@ def create(branch_name, prefix, base, remote, hook, no_cl):
         print(worktree_dir, file=_real_stdout)
     else:
         print("   Changing directory...", file=out)
+
+        # Spawn a right split with a plain shell in the worktree, alongside
+        # the Claude session that will live in the current (left) pane.
+        if cmux_workspace and run_command("command -v cmux", check=False):
+            # Capture the caller's pane ref BEFORE splitting so we can
+            # refocus it afterward — new-split steals focus, and focus-pane
+            # needs a pane ref (CMUX_SURFACE_ID is a surface ref).
+            caller_pane = None
+            identify_out = run_command("cmux identify", check=False)
+            if identify_out:
+                try:
+                    caller_pane = json.loads(identify_out)["caller"]["pane_ref"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+
+            split_out = run_command("cmux new-split right", check=False)
+            new_surface = None
+            if split_out:
+                for token in split_out.split():
+                    if token.startswith("surface:"):
+                        new_surface = token
+                        break
+            if new_surface:
+                payload = f"cd {shlex.quote(worktree_dir)}\n"
+                run_command(
+                    f"cmux send --surface {new_surface} {shlex.quote(payload)}",
+                    check=False,
+                )
+                if caller_pane:
+                    run_command(
+                        f"cmux focus-pane --pane {shlex.quote(caller_pane)}",
+                        check=False,
+                    )
 
         # Output cd command to fd 3 for shell to eval
         # worktree_dir is already an absolute path from os.path.join(git_root, ...)
