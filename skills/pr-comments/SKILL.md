@@ -2,24 +2,23 @@
 name: "pr-comments"
 description: "Fetch and analyze review comments from GitHub PRs. Use when reviewing PR feedback, addressing reviewer requests, or summarizing PR discussion."
 allowed-tools: [Bash]
-version: "1.1.0"
+version: "2.0.0"
 ---
 
 # Workflow
 
-## 1. Get PR Number and Repository
+## 1. Get PR Number
 ```bash
-# Current branch
 gh pr view --json number -q .number
 ```
 
 ## 2. Fetch Comments
 ```bash
-scripts/fetch-pr-comments <PR_NUMBER>                         # All comments (default)
-scripts/fetch-pr-comments <PR_NUMBER> --exclude-bots          # Human comments only
-scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO>            # Different repo
-scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO> --exclude-bots
+scripts/fetch-pr-comments <PR_NUMBER>
+scripts/fetch-pr-comments <PR_NUMBER> <OWNER/REPO>
 ```
+
+Returns review summaries and inline comments (including bots) in a single GraphQL call.
 
 ## 3. Summarize
 Structure output:
