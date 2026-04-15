@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Cache-backed gh run view / gh run download wrapper.
+# Purpose: avoid re-hitting the GitHub API when iteratively grepping a failed
+# CI run's logs or artifacts.
+set -euo pipefail
+
+CACHE_DIR="${CI_DEBUG_CACHE_DIR:-${TMPDIR:-/tmp}/ci-debug-cache}"
+
+usage() {
+  cat >&2 <<EOF
+Usage: ci-debug log <run-id> [owner/repo]
+       ci-debug artifacts <run-id> [owner/repo]
+       ci-debug clear <run-id>
+
+Caches 'gh run view --log-failed' output and 'gh run download' artifacts
+under \$CI_DEBUG_CACHE_DIR (default $CACHE_DIR) keyed by run id.
+Subsequent calls for the same run id return the cached path instantly.
+Grep/Read the printed path directly — do NOT re-invoke gh.
+EOF
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+cmd="$1"; shift
+
+case "$cmd" in
+  log|artifacts)
+    [[ $# -lt 1 ]] && usage
+    run_id="$1"; shift
+    repo_flag=()
+    [[ $# -ge 1 ]] && repo_flag=(--repo "$1")
+    run_cache="$CACHE_DIR/$run_id"
+    mkdir -p "$run_cache"
+    ;;
+  clear)
+    [[ $# -lt 1 ]] && usage
+    run_id="$1"
+    rm -rf "$CACHE_DIR/$run_id"
+    echo "Cleared cache for run $run_id" >&2
+    exit 0
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+ensure_completed() {
+  local status
+  status=$(gh run view "$run_id" "${repo_flag[@]}" --json status --jq .status 2>/dev/null || echo "")
+  if [[ -z "$status" ]]; then
+    echo "Unable to read run status for $run_id" >&2
+    return 1
+  fi
+  if [[ "$status" != "completed" ]]; then
+    echo "Run $run_id is $status — blocking on 'gh run watch' until completion..." >&2
+    gh run watch "$run_id" "${repo_flag[@]}" >/dev/null 2>&1 || true
+  fi
+}
+
+case "$cmd" in
+  log)
+    log_file="$run_cache/failed.log"
+    marker="$run_cache/.log-fetched"
+    if [[ ! -f "$marker" ]]; then
+      ensure_completed || exit 1
+      if ! gh run view "$run_id" "${repo_flag[@]}" --log-failed >"$log_file" 2>"$run_cache/log.err"; then
+        echo "gh run view failed:" >&2
+        cat "$run_cache/log.err" >&2
+        rm -f "$log_file"
+        exit 1
+      fi
+      touch "$marker"
+    fi
+    echo "$log_file"
+    ;;
+  artifacts)
+    art_dir="$run_cache/artifacts"
+    marker="$run_cache/.artifacts-fetched"
+    if [[ ! -f "$marker" ]]; then
+      ensure_completed || exit 1
+      mkdir -p "$art_dir"
+      if ! gh run download "$run_id" "${repo_flag[@]}" --dir "$art_dir" 2>"$run_cache/artifacts.err"; then
+        echo "gh run download failed:" >&2
+        cat "$run_cache/artifacts.err" >&2
+        exit 1
+      fi
+      touch "$marker"
+    fi
+    echo "$art_dir"
+    ;;
+esac
