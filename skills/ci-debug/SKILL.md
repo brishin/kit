@@ -22,9 +22,12 @@ Grab the run id (numeric) from the failing job.
 ## 2. Cache and inspect logs
 
 ```bash
-LOG=$(scripts/ci-debug log <run-id>)      # prints cached path
+LOG=$(scripts/ci-debug log <run-id>)             # prints cached path
 LOG=$(scripts/ci-debug log <run-id> owner/repo)  # cross-repo
+LOG=$(scripts/ci-debug log --wait <run-id>)      # block until run completes
 ```
+
+Default cold-cache cost: **1 REST call, 0 GraphQL** — no status precheck, just fetches logs directly. `--wait` adds a REST status check + `gh run watch` (opt-in).
 
 Then use **Grep/Read on `$LOG`** — not `gh` — for all subsequent exploration:
 
@@ -52,7 +55,9 @@ Read images with the Read tool directly from `$ART/...`. Artifacts are downloade
 
 ## 4. In-progress runs
 
-If the run isn't `completed`, `ci-debug log`/`artifacts` **blocks on `gh run watch <run-id>`** until completion, then fetches once. This is a single long-lived call — do not wrap it in a polling loop. Use this to wait on CI from a turn: `scripts/ci-debug log $(gh pr checks --json ...)`.
+By default, `ci-debug log`/`artifacts` **does not check run status** — it fetches whatever the API has now and caches it. If the run was still in progress, the cached log may be partial; use `scripts/ci-debug clear <run-id>` + re-run after the run completes to refetch.
+
+Pass `--wait` to block on `gh run watch <run-id>` until completion before fetching. This is one long-lived streaming call — do not wrap it in your own polling loop.
 
 ## 5. Cache hygiene
 
