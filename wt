@@ -451,6 +451,39 @@ def cleanup_derived_data(worktree_path: str) -> None:
     )
 
 
+def _cleanup_teardown(current_branch: str, wt_path: str) -> bool:
+    """Detach HEAD, delete the branch, remove the worktree. Returns True on full success."""
+    steps = [
+        ("git checkout --detach origin/main", None),
+        (f"git branch -D {current_branch}", f"✓ Deleted branch '{current_branch}'"),
+        (
+            f"git worktree remove --force {wt_path}",
+            f"✓ Deleted worktree at '{wt_path}'",
+        ),
+    ]
+    for cmd, success_msg in steps:
+        result = subprocess.run(cmd, shell=True, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            print(f"❌ Command failed: {cmd}")
+            return False
+        if success_msg:
+            print(success_msg)
+    cleanup_derived_data(wt_path)
+    return True
+
+
+def _close_cmux_workspace() -> None:
+    """Close the current cmux workspace. Must be called last — terminates the shell."""
+    workspace = os.environ.get("CMUX_WORKSPACE_ID")
+    if not workspace:
+        return
+    if not run_command("command -v cmux", check=False):
+        return
+    run_command(
+        f"cmux close-workspace --workspace {shlex.quote(workspace)}", check=False
+    )
+
+
 @cli.command()
 @click.option("--hook", is_flag=True, hidden=True, help="Hook mode for Claude Code")
 def cleanup(hook):
@@ -525,12 +558,10 @@ def cleanup(hook):
         print("✓ No unique commits on this branch")
         print("→ Safe to delete")
         wt_path = os.getcwd()
-        run_command("git checkout --detach origin/main", capture=False)
-        run_command(f"git branch -D {current_branch}", capture=False)
-        print(f"✓ Deleted branch '{current_branch}'")
-        run_command(f"git worktree remove --force {wt_path}", capture=False)
-        print(f"✓ Deleted worktree at '{wt_path}'")
-        cleanup_derived_data(wt_path)
+        if not _cleanup_teardown(current_branch, wt_path):
+            sys.exit(1)
+        if not hook:
+            _close_cmux_workspace()
         sys.exit(0)
 
     print(f"Found {unique_commits} unique commit(s) on this branch")
@@ -539,12 +570,8 @@ def cleanup(hook):
         # In hook mode, skip PR check and force delete
         print("→ Hook mode: proceeding with deletion")
         wt_path = os.getcwd()
-        run_command("git checkout --detach origin/main", capture=False)
-        run_command(f"git branch -D {current_branch}", capture=False)
-        print(f"✓ Deleted branch '{current_branch}'")
-        run_command(f"git worktree remove --force {wt_path}", capture=False)
-        print(f"✓ Deleted worktree at '{wt_path}'")
-        cleanup_derived_data(wt_path)
+        if not _cleanup_teardown(current_branch, wt_path):
+            sys.exit(1)
         sys.exit(0)
 
     print("Checking if associated PR has been merged...")
@@ -569,12 +596,10 @@ def cleanup(hook):
         print()
         print("→ Proceeding with deletion")
         wt_path = os.getcwd()
-        run_command("git checkout --detach origin/main", capture=False)
-        run_command(f"git branch -D {current_branch}", capture=False)
-        print(f"✓ Deleted branch '{current_branch}'")
-        run_command(f"git worktree remove --force {wt_path}", capture=False)
-        print(f"✓ Deleted worktree at '{wt_path}'")
-        cleanup_derived_data(wt_path)
+        if not _cleanup_teardown(current_branch, wt_path):
+            sys.exit(1)
+        if not hook:
+            _close_cmux_workspace()
         sys.exit(0)
 
     # Extract PR details
@@ -590,12 +615,10 @@ def cleanup(hook):
     print(f"✓ Found merged PR #{pr_number}: {pr_title}")
     print("→ Safe to delete")
     wt_path = os.getcwd()
-    run_command("git checkout --detach origin/main", capture=False)
-    run_command(f"git branch -D {current_branch}", capture=False)
-    print(f"✓ Deleted branch '{current_branch}'")
-    run_command(f"git worktree remove --force {wt_path}", capture=False)
-    print(f"✓ Deleted worktree at '{wt_path}'")
-    cleanup_derived_data(wt_path)
+    if not _cleanup_teardown(current_branch, wt_path):
+        sys.exit(1)
+    if not hook:
+        _close_cmux_workspace()
 
 
 def _stash_current():
