@@ -7,36 +7,12 @@
 """
 Fetch review summaries and inline comments from a GitHub PR in a single
 GraphQL call.
-
-Usage:
-  fetch-pr-comments <PR_NUMBER> [OWNER/REPO] [flags]
-
-Flags:
-  --author <login>     Only show comments authored by <login>. Repeatable.
-                       Comparison is case-insensitive.
-  --exclude-bots       Skip comments from common review bots (cursor,
-                       devin-ai-integration, github-actions[bot], coderabbitai,
-                       copilot-pull-request-reviewer[bot], etc.).
 """
 
-import argparse
 import json
 import subprocess
 import sys
 from typing import Any
-
-KNOWN_BOTS = {
-    "cursor",
-    "devin-ai-integration",
-    "github-actions",
-    "github-actions[bot]",
-    "coderabbitai",
-    "coderabbitai[bot]",
-    "copilot-pull-request-reviewer",
-    "copilot-pull-request-reviewer[bot]",
-    "sentry-io",
-    "sentry-io[bot]",
-}
 
 GRAPHQL_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
@@ -106,44 +82,17 @@ def fetch_pr_data(owner: str, repo: str, pr_number: str) -> dict[str, Any]:
     return payload["data"]["repository"]["pullRequest"]
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="fetch-pr-comments",
-        description="Fetch review summaries and inline comments from a GitHub PR.",
-    )
-    parser.add_argument("pr_number", help="PR number")
-    parser.add_argument("repo", nargs="?", help="OWNER/REPO (defaults to current repo)")
-    parser.add_argument(
-        "--author",
-        action="append",
-        default=[],
-        metavar="LOGIN",
-        help="Only include comments by LOGIN (repeatable, case-insensitive).",
-    )
-    parser.add_argument(
-        "--exclude-bots",
-        action="store_true",
-        help="Skip comments from common review bots.",
-    )
-    return parser.parse_args()
-
-
-def keep(author: str, allowed_authors: set[str], exclude_bots: bool) -> bool:
-    login = (author or "").lower()
-    if allowed_authors and login not in allowed_authors:
-        return False
-    if exclude_bots and login in KNOWN_BOTS:
-        return False
-    return True
-
-
 def main() -> None:
-    args = parse_args()
-    allowed_authors = {a.lower() for a in args.author}
+    if len(sys.argv) < 2:
+        print("Usage: fetch-pr-comments <PR_NUMBER> [OWNER/REPO]", file=sys.stderr)
+        sys.exit(1)
+
+    pr_number = sys.argv[1]
+    repo_arg = sys.argv[2] if len(sys.argv) > 2 else None
 
     try:
-        owner, repo = resolve_repo(args.repo)
-        pr = fetch_pr_data(owner, repo, args.pr_number)
+        owner, repo = resolve_repo(repo_arg)
+        pr = fetch_pr_data(owner, repo, pr_number)
     except subprocess.CalledProcessError as e:
         print(f"Error calling gh: {e.stderr}", file=sys.stderr)
         sys.exit(1)
@@ -158,7 +107,7 @@ def main() -> None:
     for review in review_nodes:
         author = (review.get("author") or {}).get("login", "")
         body = (review.get("body") or "").strip()
-        if body and keep(author, allowed_authors, args.exclude_bots):
+        if body:
             summaries.append(
                 {
                     "state": review.get("state", ""),
@@ -168,32 +117,23 @@ def main() -> None:
                 }
             )
         for comment in (review.get("comments") or {}).get("nodes", []) or []:
-            comment_author = (comment.get("author") or {}).get("login", "")
-            if not keep(comment_author, allowed_authors, args.exclude_bots):
-                continue
             inline.append(
                 {
                     "path": comment.get("path", ""),
                     "line": comment.get("line") or comment.get("originalLine"),
-                    "author": comment_author,
+                    "author": (comment.get("author") or {}).get("login", ""),
                     "body": comment.get("body", ""),
                 }
             )
 
-    filter_note = ""
-    if allowed_authors:
-        filter_note += f" (author={','.join(sorted(allowed_authors))})"
-    if args.exclude_bots:
-        filter_note += " (bots excluded)"
-
-    print(f"=== REVIEW SUMMARIES{filter_note} ===")
+    print("=== REVIEW SUMMARIES ===")
     if summaries:
         for s in summaries:
             print(json.dumps(s, indent=2))
     else:
         print("No review summaries found.")
 
-    print(f"\n=== INLINE REVIEW COMMENTS{filter_note} ===")
+    print("\n=== INLINE REVIEW COMMENTS ===")
     if inline:
         for c in inline:
             print(json.dumps(c, indent=2))
