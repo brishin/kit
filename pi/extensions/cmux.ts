@@ -83,7 +83,7 @@ export function formatAssistantOutput(message: AssistantLikeMessage): string | u
 	if (visible) return capPayload(visible);
 
 	const thinking = normalizePayload(thinkingText.join("\n\n"));
-	if (thinking) return capPayload(`[thinking]\n${thinking}`);
+	if (thinking) return capPayload(thinking);
 
 	return undefined;
 }
