@@ -15,6 +15,17 @@ type AssistantLikeMessage = {
 	content?: unknown;
 };
 
+type CmuxIdentify = {
+	caller?: {
+		tab_ref?: string;
+		surface_ref?: string;
+	};
+	focused?: {
+		tab_ref?: string;
+		surface_ref?: string;
+	};
+};
+
 async function runCmux(args: string[], timeoutMs = CMUX_TIMEOUT_MS): Promise<boolean> {
 	try {
 		await execFileAsync("cmux", args, { timeout: timeoutMs });
@@ -25,10 +36,37 @@ async function runCmux(args: string[], timeoutMs = CMUX_TIMEOUT_MS): Promise<boo
 	}
 }
 
+async function getCmuxIdentify(): Promise<CmuxIdentify | undefined> {
+	try {
+		const { stdout } = await execFileAsync("cmux", ["identify", "--json"], { timeout: CMUX_TIMEOUT_MS });
+		return JSON.parse(stdout) as CmuxIdentify;
+	} catch {
+		// Running pi outside cmux or without the cmux CLI should be silent.
+		return undefined;
+	}
+}
+
+async function isCallerFocused(): Promise<boolean> {
+	const identify = await getCmuxIdentify();
+	if (!identify?.caller || !identify.focused) return false;
+
+	if (identify.caller.surface_ref && identify.focused.surface_ref) {
+		return identify.caller.surface_ref === identify.focused.surface_ref;
+	}
+	if (identify.caller.tab_ref && identify.focused.tab_ref) {
+		return identify.caller.tab_ref === identify.focused.tab_ref;
+	}
+	return false;
+}
+
 async function updateSidebar(message: string): Promise<boolean> {
 	// `cmux log --level info` renders the latest log with a `circle.fill` dot.
 	// A status/metadata row with no icon updates the sidebar without that dot.
 	return runCmux(["set-status", "pi", message, "--format", "markdown", "--priority", "100"]);
+}
+
+async function notifyPiAgent(body: string): Promise<boolean> {
+	return runCmux(["notify", "--title", "Pi Agent", "--body", body]);
 }
 
 function getLastAssistantOutput(ctx: ExtensionContext): string | undefined {
@@ -88,6 +126,18 @@ export function formatAssistantOutput(message: AssistantLikeMessage): string | u
 	return undefined;
 }
 
+async function handleAssistantTurnEnd(message: AssistantLikeMessage): Promise<void> {
+	if (message.role !== "assistant") return;
+	const payload = formatAssistantOutput(message);
+	if (!payload) return;
+
+	if (await isCallerFocused()) {
+		await updateSidebar(payload);
+	} else {
+		await notifyPiAgent(payload);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		if (event.reason !== "resume") return;
@@ -96,10 +146,7 @@ export default function (pi: ExtensionAPI) {
 		void updateSidebar(`[resumed]\n${payload}`);
 	});
 
-	pi.on("message_end", (event) => {
-		if (event.message.role !== "assistant") return;
-		const payload = formatAssistantOutput(event.message);
-		if (!payload) return;
-		void updateSidebar(payload);
+	pi.on("turn_end", (event) => {
+		void handleAssistantTurnEnd(event.message);
 	});
 }
