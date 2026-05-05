@@ -26,6 +26,8 @@ Add this repository as a Claude Code marketplace via `/plugin`.
 
 **Watch PR**: Monitor PR status by polling Devin review and CI checks, updating cmux sidebar indicators. Use after creating a PR or pushing to a branch with an open PR. Launches a background agent that polls for up to 15 minutes.
 
+**Annotate Diff**: Turn a diff (working tree, staged, commit, branch, or GitHub PR) into a guided code-review walkthrough rendered via `delta --annotation-file`. Clusters files into 1-7 sections tagged `Core` / `Supporting` / `Mechanical`, with each section's description naming what changed, how it fits with siblings, and what to watch for as a reviewer. Optional `open` keyword launches the rendered walkthrough in a new cmux surface.
+
 ## Pi Coding Agent Extensions
 
 TypeScript extensions for the [pi coding agent harness](https://github.com/mariozechner/pi-coding-agent) under `pi/extensions/`. Discovered automatically when pi runs inside this repo.
