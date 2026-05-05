@@ -7,6 +7,7 @@ const execFileAsync = promisify(execFile);
 const CMUX_TIMEOUT_MS = 2_000;
 const MAX_PAYLOAD_CHARS = 10_000;
 const TRUNCATION_NOTE = "\n\n[… truncated for cmux sidebar …]";
+const CMUX_STATUS_KEY = "pi";
 
 type ContentBlock = Record<string, unknown>;
 
@@ -59,13 +60,38 @@ async function isCallerFocused(): Promise<boolean> {
 	return false;
 }
 
+async function getStatusKeys(): Promise<string[]> {
+	try {
+		const { stdout } = await execFileAsync("cmux", ["list-status"], { timeout: CMUX_TIMEOUT_MS });
+		return stdout
+			.split("\n")
+			.map((line) => line.match(/^([^=\s]+)=/)?.[1])
+			.filter((key): key is string => Boolean(key));
+	} catch {
+		// Running pi outside cmux or without the cmux CLI should be silent.
+		return [];
+	}
+}
+
+async function clearStatuses(): Promise<void> {
+	const keys = await getStatusKeys();
+	await Promise.all(keys.map((key) => runCmux(["clear-status", key])));
+}
+
+async function clearNotifications(): Promise<boolean> {
+	return runCmux(["clear-notifications"]);
+}
+
 async function updateSidebar(message: string): Promise<boolean> {
 	// `cmux log --level info` renders the latest log with a `circle.fill` dot.
 	// A status/metadata row with no icon updates the sidebar without that dot.
-	return runCmux(["set-status", "pi", message, "--format", "markdown", "--priority", "100"]);
+	await clearStatuses();
+	await clearNotifications();
+	return runCmux(["set-status", CMUX_STATUS_KEY, message, "--format", "markdown", "--priority", "100"]);
 }
 
 async function notifyPiAgent(body: string): Promise<boolean> {
+	await clearNotifications();
 	return runCmux(["notify", "--title", "Pi Agent", "--body", body]);
 }
 
@@ -87,8 +113,20 @@ function getString(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-function normalizePayload(text: string): string {
+function stripTerminalControlSequences(text: string): string {
 	return text
+		// OSC, PM, and APC sequences terminated by BEL or ST.
+		.replace(/\x1b[\]()^_][\s\S]*?(?:\x07|\x1b\\)/g, "")
+		// DCS and SOS sequences terminated by ST.
+		.replace(/\x1b[PX][\s\S]*?\x1b\\/g, "")
+		// CSI sequences, including common SGR terminal color codes.
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		// Single-character ESC sequences.
+		.replace(/\x1b[ -/]*[@-~]/g, "");
+}
+
+function normalizePayload(text: string): string {
+	return stripTerminalControlSequences(text)
 		.replace(/\r\n?/g, "\n")
 		.replace(/[ \t]+\n/g, "\n")
 		.replace(/\n{3,}/g, "\n\n")
@@ -104,24 +142,17 @@ export function formatAssistantOutput(message: AssistantLikeMessage): string | u
 	const content = message.content;
 	const blocks = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
 	const visibleText: string[] = [];
-	const thinkingText: string[] = [];
 
 	for (const block of blocks) {
 		if (!isBlock(block)) continue;
 		if (block.type === "text") {
 			const text = getString(block.text);
 			if (text?.trim()) visibleText.push(text);
-		} else if (block.type === "thinking") {
-			const thinking = getString(block.thinking) ?? getString(block.text);
-			if (thinking?.trim()) thinkingText.push(thinking);
 		}
 	}
 
 	const visible = normalizePayload(visibleText.join("\n\n"));
 	if (visible) return capPayload(visible);
-
-	const thinking = normalizePayload(thinkingText.join("\n\n"));
-	if (thinking) return capPayload(thinking);
 
 	return undefined;
 }
