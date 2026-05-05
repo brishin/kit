@@ -1,5 +1,5 @@
 ---
-name: Log-Based Debugger
+name: log-debugger
 description: Solves tricky bugs by strategically placing log statements with unique greppable prefixes, then analyzing program state through captured output. Use when debugging complex control flow, race conditions, state mutations, or issues where traditional debugging is difficult. Supports both manual and autonomous log retrieval.
 allowed-tools:
   - Read

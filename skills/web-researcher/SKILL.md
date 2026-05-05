@@ -1,5 +1,5 @@
 ---
-name: "Web Research"
+name: web-researcher
 description: "Research current technical information from the web. Use for latest docs, version features, security updates, error resolution, or tech comparisons. Essential for post-January 2025 info."
 allowed-tools: [Bash]
 version: "1.0.0"

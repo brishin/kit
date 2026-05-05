@@ -1,5 +1,5 @@
 ---
-name: "Skill Generator"
+name: skill-generator
 description: "Generate new Claude Code skills with best practices. Use when creating new skills, understanding skill architecture, or learning skill best practices. Covers YAML frontmatter, descriptions, allowed-tools, structure, and examples."
 allowed-tools: [Write, Read, Glob, AskUserQuestion]
 version: "1.1.0"

@@ -1,5 +1,5 @@
 ---
-name: "Graphite Stacked PRs"
+name: graphite-stacked-prs
 description: "Create and manage stacked PRs using Graphite CLI (gt). Use for building feature stacks, breaking up large changes, navigating dependent branches, or when user mentions gt, Graphite, stacked PRs, or trunk-based development workflows."
 allowed-tools: [Bash]
 version: "1.0.0"

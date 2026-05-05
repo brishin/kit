@@ -1,5 +1,5 @@
 ---
-name: "Skill Evaluator"
+name: skill-evaluator
 description: "Design and run systematic evaluations for Claude Code skills. Use when optimizing skill behavior, testing variations, or making data-driven improvements to skills."
 allowed-tools: [Read, Write, Edit, Glob, Bash, TodoWrite]
 version: "1.0.0"

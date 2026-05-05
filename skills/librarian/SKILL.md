@@ -1,5 +1,5 @@
 ---
-name: "Librarian"
+name: librarian
 description: "Search and explore remote GitHub repositories to understand external codebases, dependencies, and reference implementations. Use when investigating how libraries work, tracing dependency behavior, finding code examples, or exploring open-source patterns."
 allowed-tools: [Bash, Task, Read, Grep, Glob]
 version: "1.0.0"
