@@ -152,7 +152,9 @@ function contextText(ctx: ExtensionContext): string {
 	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 	const percent = usage?.percent;
 	const pctText = percent == null ? "?" : `${Math.round(percent)}%`;
-	const filled = percent == null ? 0 : Math.max(0, Math.min(BAR_WIDTH, Math.round((percent / 100) * BAR_WIDTH)));
+	// Use floor so each dot represents a fully consumed 10% chunk.
+	// This avoids overstating usage (e.g. 5% showing one dot, 95% showing a full bar).
+	const filled = percent == null ? 0 : Math.max(0, Math.min(BAR_WIDTH, Math.floor((percent / 100) * BAR_WIDTH)));
 	const bar = "▪".repeat(filled) + "▫".repeat(BAR_WIDTH - filled);
 	return `${bar} ${pctText}/${formatTokens(contextWindow)}`;
 }
