@@ -4,7 +4,7 @@ Personal utility scripts for git worktree management and workflow automation.
 
 ## Project Overview
 
-This repository contains command-line utilities that enhance git worktree workflows, primarily focused on the unified `wt` CLI tool, as well as a Claude Code plugin that provides specialized skills for web research, Graphite stacked PRs, and skill generation.
+This repository contains command-line utilities (`wt`, `linear`), a Claude Code plugin with specialized skills, and **pi coding agent extensions** that customize the TUI and integrate with external multiplexers.
 
 ## Claude Code Plugin
 
@@ -25,6 +25,32 @@ Add this repository as a Claude Code marketplace via `/plugin`.
 **pr-comments**: Fetch and analyze human review comments from GitHub PRs. Filters out bot comments and provides structured summaries of reviewer feedback, action items, and discussion themes. Uses a Python script for reliable comment fetching and filtering.
 
 **Watch PR**: Monitor PR status by polling Devin review and CI checks, updating cmux sidebar indicators. Use after creating a PR or pushing to a branch with an open PR. Launches a background agent that polls for up to 15 minutes.
+
+## Pi Coding Agent Extensions
+
+TypeScript extensions for the [pi coding agent harness](https://github.com/mariozechner/pi-coding-agent) under `pi/extensions/`. Discovered automatically when pi runs inside this repo.
+
+### `cmux.ts` — Sidebar Status Bridge
+
+Syncs the latest assistant output to the `cmux` multiplexer sidebar via `cmux set-status`.
+
+- **Events**: `session_start` (reason `resume`), `message_end`
+- **Content extraction**: Parses assistant `content` blocks (`text`, `thinking`), normalizes whitespace (`\r\n` → `\n`, collapses 3+ newlines), and caps at **10,000 chars** with a truncation marker
+- **Resume indicator**: Prefixes resumed sessions with `[resumed]`
+- **Silent degradation**: No-op when `cmux` CLI is unavailable
+
+### `usage-footer.ts` — Powerline TUI Footer
+
+Replaces the default pi footer with a powerline-style status bar using `@mariozechner/pi-tui` (`visibleWidth`, `truncateToWidth`).
+
+- **Git segment**: Current branch, delta count (`@{upstream}..HEAD` with `main..HEAD` fallback), active ● / idle ○ indicator
+- **Context segment**: ASCII usage bar (`▪▪▪▫▫`), context-window percentage, total token count
+- **Cost segments**:
+  - Session cost (§) — live sum of `usage.cost.total` from assistant messages in the current session
+  - Daily cost (☉) — aggregated from `~/.pi/agent/sessions/**/*.jsonl` since midnight, with a 60-second cache
+- **Model segment**: Provider, stripped model ID, reasoning level, subscription flag
+- **Responsive layout**: Single-line when wide; two-line (git+context / costs+model) plus extension-status line when narrow
+- **Events**: `session_start`, `agent_start`, `agent_end`, `message_end`, `model_select`, `thinking_level_select`
 
 ## Main Tool: `wt`
 
@@ -132,6 +158,9 @@ This pattern allows:
 ### File Structure
 
 - `wt` - Unified Python CLI (main tool)
+- `linear` - Linear GraphQL CLI
+- `pi/extensions/` - pi coding agent harness TypeScript extensions (`cmux.ts`, `usage-footer.ts`)
+- `skills/` - Claude Code plugin skills (web-researcher, graphite, pr-comments, etc.)
 - `wt-create` - Legacy Python script (deprecated, superseded by `wt create`)
 - `cleanup-worktree` - Legacy bash script (deprecated, superseded by `wt cleanup`)
 - `git-root` - Legacy bash script (deprecated, superseded by `wt root`)
