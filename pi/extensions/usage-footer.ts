@@ -13,6 +13,7 @@ const execFileAsync = promisify(execFile);
 const BAR_WIDTH = 10;
 const DAILY_CACHE_MS = 60_000;
 const SESSION_DIR = process.env.PI_CODING_AGENT_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions");
+const STATUS_DENYLIST = new Set(["rewind"]);
 
 const C = {
 	reset: "\x1b[0m",
@@ -284,6 +285,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					const statuses = Array.from(footerData.getExtensionStatuses().entries())
+						.filter(([key]) => !STATUS_DENYLIST.has(key))
 						.sort(([a], [b]) => a.localeCompare(b))
 						.map(([, text]) => sanitizeStatusText(text))
 						.filter(Boolean);
