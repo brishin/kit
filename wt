@@ -201,20 +201,25 @@ def create(branch_name, prefix, base, remote, hook, no_cl):
     print(f"Worktree directory: {worktree_dir}", file=out)
     print(file=out)
 
-    # Check if worktree directory already exists
+    # Check if worktree directory already exists. If it is an unregistered
+    # leftover from a previous cleanup (for example Git LFS hooks under
+    # .githooks), remove it before proceeding.
     if Path(worktree_dir).exists():
-        if hook:
-            # Reuse existing worktree
+        is_registered = _is_registered_worktree(worktree_dir, git_root)
+        if not is_registered and _remove_safe_stale_worktree_dir(worktree_dir, git_root):
+            pass
+        elif hook and is_registered:
+            # Reuse existing registered worktree
             print(worktree_dir, file=_real_stdout)
             sys.exit(0)
+        else:
+            print(f"❌ Error: Directory {worktree_dir} already exists", file=out)
 
-        print(f"❌ Error: Directory {worktree_dir} already exists", file=out)
-
-        # Show existing worktrees
-        print("\nExisting worktrees:", file=out)
-        worktree_list = run_command("git worktree list")
-        print(worktree_list if worktree_list else "", file=out)
-        sys.exit(1)
+            # Show existing worktrees
+            print("\nExisting worktrees:", file=out)
+            worktree_list = run_command("git worktree list")
+            print(worktree_list if worktree_list else "", file=out)
+            sys.exit(1)
 
     # Check if branch already exists locally
     local_branch_exists = (
@@ -451,23 +456,153 @@ def cleanup_derived_data(worktree_path: str) -> None:
     )
 
 
+SAFE_GITHOOK_LEFTOVERS = {
+    "post-checkout",
+    "post-commit",
+    "post-merge",
+    "pre-push",
+}
+
+
+def _git_main_root() -> str | None:
+    """Return the main repository root, even when called from a worktree."""
+    git_common_dir = run_command("git rev-parse --git-common-dir", check=False)
+    if not git_common_dir:
+        return None
+    return str(Path(git_common_dir).parent.resolve())
+
+
+def _registered_worktree_paths(cwd: str | None = None) -> set[Path]:
+    """Return registered worktree paths for the current repo."""
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return set()
+
+    paths: set[Path] = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.add(Path(line.split(" ", 1)[1]).resolve())
+    return paths
+
+
+def _is_registered_worktree(path: str, cwd: str | None = None) -> bool:
+    """Check whether path is still registered as a git worktree."""
+    return Path(path).resolve() in _registered_worktree_paths(cwd)
+
+
+def _safe_leftover_paths(path: str) -> tuple[bool, list[Path]]:
+    """Return whether a stale worktree dir contains only safe generated leftovers."""
+    root = Path(path)
+    if not root.exists():
+        return True, []
+    if not root.is_dir():
+        return False, [root]
+
+    unsafe: list[Path] = []
+    safe_files: list[Path] = []
+    allowed_dirs = {root / ".githooks"}
+
+    for child in root.rglob("*"):
+        if child.is_dir():
+            if child not in allowed_dirs:
+                unsafe.append(child)
+            continue
+
+        rel = child.relative_to(root)
+        if (
+            len(rel.parts) == 2
+            and rel.parts[0] == ".githooks"
+            and rel.parts[1] in SAFE_GITHOOK_LEFTOVERS
+        ):
+            safe_files.append(child)
+        else:
+            unsafe.append(child)
+
+    return not unsafe, unsafe if unsafe else safe_files
+
+
+def _remove_safe_stale_worktree_dir(path: str, repo_cwd: str | None = None) -> bool:
+    """Remove an unregistered stale worktree dir if only allowlisted leftovers remain."""
+    root = Path(path)
+    if not root.exists():
+        return True
+    if _is_registered_worktree(path, repo_cwd):
+        return False
+
+    is_safe, paths = _safe_leftover_paths(path)
+    if not is_safe:
+        print("❌ Worktree directory still contains files that wt will not delete:")
+        for unsafe_path in paths[:20]:
+            print(f"   {unsafe_path}")
+        if len(paths) > 20:
+            print(f"   ... and {len(paths) - 20} more")
+        return False
+
+    for leftover in paths:
+        if leftover.exists() and leftover.is_file():
+            leftover.unlink()
+    githooks = root / ".githooks"
+    if githooks.exists():
+        githooks.rmdir()
+    root.rmdir()
+    print(f"✓ Removed stale worktree leftovers at '{path}'")
+    return True
+
+
 def _cleanup_teardown(current_branch: str, wt_path: str) -> bool:
-    """Detach HEAD, delete the branch, remove the worktree. Returns True on full success."""
-    steps = [
-        ("git checkout --detach origin/main", None),
-        (f"git branch -D {current_branch}", f"✓ Deleted branch '{current_branch}'"),
-        (
-            f"git worktree remove --force {wt_path}",
-            f"✓ Deleted worktree at '{wt_path}'",
-        ),
-    ]
-    for cmd, success_msg in steps:
-        result = subprocess.run(cmd, shell=True, stderr=subprocess.STDOUT)
-        if result.returncode != 0:
-            print(f"❌ Command failed: {cmd}")
+    """Delete the worktree and branch. Returns True on full success."""
+    repo_root = _git_main_root()
+    repo_cwd = repo_root or os.getcwd()
+
+    # Leave the doomed worktree before removing it.
+    if repo_root:
+        os.chdir(repo_root)
+
+    remove_result = subprocess.run(
+        ["git", "worktree", "remove", "--force", wt_path],
+        cwd=repo_cwd,
+        capture_output=True,
+        text=True,
+    )
+    if remove_result.returncode != 0:
+        output = (remove_result.stdout + remove_result.stderr).strip()
+        if output:
+            print(output)
+        if not _remove_safe_stale_worktree_dir(wt_path, repo_cwd):
+            print(f"❌ Command failed: git worktree remove --force {shlex.quote(wt_path)}")
             return False
-        if success_msg:
-            print(success_msg)
+    else:
+        print(f"✓ Deleted worktree at '{wt_path}'")
+
+    branch_exists = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{current_branch}"],
+        cwd=repo_cwd,
+        capture_output=True,
+        text=True,
+    )
+    if branch_exists.returncode != 0:
+        print(f"✓ Branch '{current_branch}' was already deleted")
+    else:
+        delete_result = subprocess.run(
+            ["git", "branch", "-D", current_branch],
+            cwd=repo_cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if delete_result.returncode != 0:
+            output = delete_result.stdout.strip()
+            if output:
+                print(output)
+            print(f"❌ Command failed: git branch -D {shlex.quote(current_branch)}")
+            return False
+        print(f"✓ Deleted branch '{current_branch}'")
+
     cleanup_derived_data(wt_path)
     return True
 
@@ -676,17 +811,13 @@ def _stash_current():
         print("❌ Error: Could not determine HEAD commit")
         sys.exit(1)
 
-    # Create ref first (before any destructive ops)
+    # Create ref first (before any destructive ops) so the commit stays
+    # reachable even after the branch is deleted by teardown.
     run_command(f"git update-ref {ref_name} {sha}")
     print(f"✓ Created ref {ref_name} -> {sha[:8]}")
 
-    # Teardown: detach HEAD, delete branch, remove worktree, cleanup derived data
-    run_command("git checkout --detach HEAD", capture=False)
-    run_command(f"git branch -D {current_branch}", capture=False)
-    print(f"✓ Deleted branch '{current_branch}'")
-    run_command(f"git worktree remove --force {wt_path}", capture=False)
-    print(f"✓ Removed worktree at '{wt_path}'")
-    cleanup_derived_data(wt_path)
+    if not _cleanup_teardown(current_branch, wt_path):
+        sys.exit(1)
 
     print()
     print(f"✅ Stashed '{current_branch}'")
