@@ -1,12 +1,12 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { compact, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { openaiCodexOAuthProvider } from "@mariozechner/pi-ai/oauth";
 
 const PROVIDER = "openai-codex";
 const FAST_MODEL_ID = "gpt-5.5-fast";
 const SUBSCRIPTION_MODEL_ID = "gpt-5.5";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+function isFastCodexModel(model: { provider?: string; id?: string } | undefined) {
+	return model?.provider === PROVIDER && model.id === FAST_MODEL_ID;
 }
 
 const codexModelDefaults = {
@@ -110,31 +110,41 @@ export default function (pi: ExtensionAPI) {
 		name: "ChatGPT Plus/Pro (Codex Subscription)",
 		baseUrl: "https://chatgpt.com/backend-api",
 		api: "openai-codex-responses",
-		oauth: {
-			name: openaiCodexOAuthProvider.name,
-			login: openaiCodexOAuthProvider.login,
-			refreshToken: openaiCodexOAuthProvider.refreshToken,
-			getApiKey: openaiCodexOAuthProvider.getApiKey,
-		},
+		oauth: openaiCodexOAuthProvider,
 		models: codexModels,
 	});
 
 	pi.on("before_provider_request", (event) => {
-		const payload = event.payload;
-		if (!isRecord(payload) || payload.model !== FAST_MODEL_ID) return;
+		const payload = event.payload as Record<string, unknown> | undefined;
+		if (payload?.model !== FAST_MODEL_ID) return;
 
-		return {
-			...payload,
-			model: SUBSCRIPTION_MODEL_ID,
-			service_tier: "priority",
-		};
+		return { ...payload, model: SUBSCRIPTION_MODEL_ID, service_tier: "priority" };
+	});
+
+	pi.on("session_before_compact", async (event, ctx) => {
+		if (!isFastCodexModel(ctx.model)) return;
+
+		const model = ctx.modelRegistry.find(PROVIDER, SUBSCRIPTION_MODEL_ID);
+		if (!model) return;
+
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok || !auth.apiKey) return;
+
+		ctx.ui.notify(`Compacting with ${SUBSCRIPTION_MODEL_ID} (without fast tier)...`, "info");
+
+		const result = await compact(
+			event.preparation,
+			model,
+			auth.apiKey,
+			auth.headers,
+			event.customInstructions,
+			event.signal,
+		);
+
+		return { compaction: result };
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		if (event.model.provider === PROVIDER && event.model.id === FAST_MODEL_ID) {
-			ctx.ui.setStatus("gpt-fast-model", "codex: fast");
-		} else {
-			ctx.ui.setStatus("gpt-fast-model", undefined);
-		}
+		ctx.ui.setStatus("gpt-fast-model", isFastCodexModel(event.model) ? "codex: fast" : undefined);
 	});
 }
