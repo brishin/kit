@@ -80,6 +80,46 @@ def run_command(cmd, capture=True, check=True):
         return e.stdout.strip() if e.stdout else None
 
 
+def run_command_in_dir(cmd, cwd, capture=True, check=True):
+    """Run a shell command from a specific directory and return the result."""
+    try:
+        if capture:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=check,
+            )
+            if not check and result.returncode != 0:
+                return None
+            return result.stdout.strip()
+
+        subprocess.run(
+            cmd,
+            shell=True,
+            cwd=cwd,
+            check=check,
+            stderr=subprocess.STDOUT,
+        )
+        return None
+    except subprocess.CalledProcessError as e:
+        if check:
+            return None
+        return e.stdout.strip() if e.stdout else None
+
+
+def setup_mise(worktree_dir, out):
+    """Trust and install mise tooling for a newly-created worktree."""
+    if not run_command("command -v mise", check=False):
+        return
+
+    print("\n🔧 Setting up mise...", file=out)
+    run_command(f"mise trust {shlex.quote(worktree_dir)}", capture=False, check=False)
+    run_command_in_dir("mise install", worktree_dir, capture=False, check=False)
+
+
 def check_git_repo():
     """Check if we're in a git repository."""
     result = run_command("git rev-parse --git-dir")
@@ -363,6 +403,8 @@ def create(branch_name, prefix, base, remote, hook, no_cl):
         os.chdir(worktree_dir)
         # Run gt track with parent set to base branch (default: main)
         run_command(f"gt track --parent {base} --quiet", capture=False, check=False)
+
+    setup_mise(worktree_dir, out)
 
     if hook:
         # In hook mode, print worktree path to real stdout for Claude Code
