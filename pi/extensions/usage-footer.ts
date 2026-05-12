@@ -13,7 +13,13 @@ const execFileAsync = promisify(execFile);
 const BAR_WIDTH = 10;
 const DAILY_CACHE_MS = 60_000;
 const SESSION_DIR = process.env.PI_CODING_AGENT_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions");
-const STATUS_DENYLIST = new Set(["rewind"]);
+const STATUS_DENYLIST = new Set([
+	"rewind",
+	// @howaboua/pi-codex-conversion renders a "Codex adapter" footer/status line
+	// when it enables its compatibility tools. This footer already exposes the
+	// active model/provider, so suppress that duplicate line.
+	"codex-adapter",
+]);
 
 const C = {
 	reset: "\x1b[0m",
