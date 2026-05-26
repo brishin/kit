@@ -74,7 +74,7 @@ ensure_completed() {
   fi
   if [[ "$status" != "completed" ]]; then
     echo "Run $run_id is $status — blocking on 'gh run watch' until completion..." >&2
-    gh run watch "$run_id" "${repo_flag[@]}" >/dev/null 2>&1 || true
+    gh run watch "$run_id" ${repo_flag[@]+"${repo_flag[@]}"} >/dev/null 2>&1 || true
   fi
 }
 
@@ -84,7 +84,7 @@ case "$cmd" in
     marker="$run_cache/.log-fetched"
     if [[ ! -f "$marker" ]]; then
       [[ "$WAIT" == "1" ]] && { ensure_completed || exit 1; }
-      if ! gh run view "$run_id" "${repo_flag[@]}" --log-failed >"$log_file" 2>"$run_cache/log.err"; then
+      if ! gh run view "$run_id" ${repo_flag[@]+"${repo_flag[@]}"} --log-failed >"$log_file" 2>"$run_cache/log.err"; then
         echo "gh run view failed:" >&2
         cat "$run_cache/log.err" >&2
         rm -f "$log_file"
@@ -100,7 +100,7 @@ case "$cmd" in
     if [[ ! -f "$marker" ]]; then
       [[ "$WAIT" == "1" ]] && { ensure_completed || exit 1; }
       mkdir -p "$art_dir"
-      if ! gh run download "$run_id" "${repo_flag[@]}" --dir "$art_dir" 2>"$run_cache/artifacts.err"; then
+      if ! gh run download "$run_id" ${repo_flag[@]+"${repo_flag[@]}"} --dir "$art_dir" 2>"$run_cache/artifacts.err"; then
         echo "gh run download failed:" >&2
         cat "$run_cache/artifacts.err" >&2
         exit 1
