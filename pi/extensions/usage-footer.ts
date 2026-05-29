@@ -1,10 +1,11 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { execFile } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -13,6 +14,9 @@ const execFileAsync = promisify(execFile);
 const BAR_WIDTH = 10;
 const DAILY_CACHE_MS = 60_000;
 const SESSION_DIR = process.env.PI_CODING_AGENT_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions");
+const CACHE_VERSION = 1;
+const CACHE_FILE = join(homedir(), ".pi", "agent", "cache", "usage-footer-daily-cost.json");
+const REFRESH_RETRY_MS = 10_000;
 const STATUS_DENYLIST = new Set([
 	"rewind",
 	// @howaboua/pi-codex-conversion renders a "Codex adapter" footer/status line
@@ -87,7 +91,258 @@ function formatCost(cost: number): string {
 	return `$${cost.toFixed(cost >= 100 ? 0 : cost >= 10 ? 2 : 2)}`;
 }
 
-function sumSessionCost(ctx: ExtensionContext): number {
+function todayStart(): number {
+	const d = new Date();
+	d.setHours(0, 0, 0, 0);
+	return d.getTime();
+}
+
+type FileCostCacheEntry = {
+	mtimeMs: number;
+	size: number;
+	cost: number;
+};
+
+type PersistentDailyCostCache = {
+	version: number;
+	sessionDir: string;
+	dayStart: number;
+	dailyCost: number;
+	computedAt: number;
+	files: Record<string, FileCostCacheEntry>;
+};
+
+type JsonlFileStat = FileCostCacheEntry & { path: string };
+
+let dailyCostCache = 0;
+let dailyCostCacheAt = 0;
+let dailyCostDayStart = todayStart();
+let dailyCostRefreshInFlight = false;
+let dailyCostCacheLoaded = false;
+let dailyCostRefreshError: string | undefined;
+let dailyCostNextRetryAt = 0;
+let sessionCostCache = 0;
+const fileCostCache = new Map<string, FileCostCacheEntry>();
+
+function isFileCostCacheEntry(value: unknown): value is FileCostCacheEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as Record<string, unknown>;
+	return typeof entry.mtimeMs === "number" && typeof entry.size === "number" && typeof entry.cost === "number";
+}
+
+function loadPersistentDailyCostCache(): void {
+	if (dailyCostCacheLoaded) return;
+	dailyCostCacheLoaded = true;
+
+	const start = todayStart();
+	dailyCostDayStart = start;
+	try {
+		if (!existsSync(CACHE_FILE)) return;
+		const parsed = JSON.parse(readFileSync(CACHE_FILE, "utf8")) as Partial<PersistentDailyCostCache>;
+		if (parsed.version !== CACHE_VERSION || parsed.sessionDir !== SESSION_DIR || parsed.dayStart !== start) return;
+		if (typeof parsed.dailyCost !== "number" || typeof parsed.computedAt !== "number" || typeof parsed.files !== "object" || parsed.files === null) return;
+
+		dailyCostCache = parsed.dailyCost;
+		dailyCostCacheAt = parsed.computedAt;
+		fileCostCache.clear();
+		for (const [path, entry] of Object.entries(parsed.files)) {
+			if (isFileCostCacheEntry(entry)) fileCostCache.set(path, entry);
+		}
+	} catch {
+		dailyCostCache = 0;
+		dailyCostCacheAt = 0;
+		fileCostCache.clear();
+	}
+}
+
+async function savePersistentDailyCostCache(): Promise<void> {
+	const files = Object.fromEntries(fileCostCache.entries());
+	const payload: PersistentDailyCostCache = {
+		version: CACHE_VERSION,
+		sessionDir: SESSION_DIR,
+		dayStart: dailyCostDayStart,
+		dailyCost: dailyCostCache,
+		computedAt: dailyCostCacheAt,
+		files,
+	};
+	const tmp = `${CACHE_FILE}.tmp-${process.pid}-${Date.now()}`;
+	await mkdir(dirname(CACHE_FILE), { recursive: true });
+	await writeFile(tmp, JSON.stringify(payload), "utf8");
+	await rename(tmp, CACHE_FILE);
+}
+
+async function listJsonlFileStats(dir: string): Promise<JsonlFileStat[]> {
+	const out: JsonlFileStat[] = [];
+	async function walk(current: string): Promise<void> {
+		let entries;
+		try {
+			entries = await readdir(current, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		await Promise.all(
+			entries.map(async (ent) => {
+				const p = join(current, ent.name);
+				if (ent.isDirectory()) {
+					await walk(p);
+					return;
+				}
+				if (!ent.isFile() || !ent.name.endsWith(".jsonl")) return;
+				try {
+					const s = await stat(p);
+					out.push({ path: p, mtimeMs: s.mtimeMs, size: s.size, cost: 0 });
+				} catch {
+					// File may have disappeared while scanning.
+				}
+			}),
+		);
+	}
+	await walk(dir);
+	return out;
+}
+
+const DAILY_COST_SCANNER_SCRIPT = String.raw`
+const fs = require("node:fs");
+const readline = require("node:readline");
+
+function timestampMs(value) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+async function scanFile(file, dayStart) {
+  let cost = 0;
+  const rl = readline.createInterface({ input: fs.createReadStream(file.path, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type !== "message" || entry?.message?.role !== "assistant") continue;
+      const ts = timestampMs(entry.message.timestamp ?? entry.timestamp);
+      if (ts >= dayStart) cost += entry.message.usage?.cost?.total ?? 0;
+    } catch {}
+  }
+  return { path: file.path, mtimeMs: file.mtimeMs, size: file.size, cost };
+}
+
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", async () => {
+  try {
+    const payload = JSON.parse(input);
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const dayStart = typeof payload.dayStart === "number" ? payload.dayStart : 0;
+    const results = [];
+    for (const file of files) {
+      try {
+        results.push(await scanFile(file, dayStart));
+      } catch {}
+    }
+    process.stdout.write(JSON.stringify({ files: results }));
+  } catch (error) {
+    process.stderr.write(error && error.stack ? error.stack : String(error));
+    process.exitCode = 1;
+  }
+});
+`;
+
+async function parseChangedFilesInChild(files: JsonlFileStat[], dayStart: number): Promise<JsonlFileStat[]> {
+	if (files.length === 0) return [];
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, ["-e", DAILY_COST_SCANNER_SCRIPT], { stdio: ["pipe", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => (stdout += chunk));
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code !== 0) {
+				reject(new Error(stderr || `daily cost scanner exited with ${code}`));
+				return;
+			}
+			try {
+				const parsed = JSON.parse(stdout) as { files?: Array<JsonlFileStat> };
+				resolve(parsed.files ?? []);
+			} catch (error) {
+				reject(error);
+			}
+		});
+		child.stdin.end(JSON.stringify({ dayStart, files }));
+	});
+}
+
+async function refreshDailyCost(): Promise<void> {
+	const dayStart = todayStart();
+	const stats = await listJsonlFileStats(SESSION_DIR);
+	const seen = new Set<string>();
+	const toParse: JsonlFileStat[] = [];
+	let total = 0;
+
+	for (const file of stats) {
+		if (file.mtimeMs < dayStart) continue;
+		seen.add(file.path);
+		const cached = fileCostCache.get(file.path);
+		if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
+			total += cached.cost;
+			continue;
+		}
+		toParse.push(file);
+	}
+
+	const parsedFiles = await parseChangedFilesInChild(toParse, dayStart);
+	for (const file of parsedFiles) {
+		fileCostCache.set(file.path, { mtimeMs: file.mtimeMs, size: file.size, cost: file.cost });
+		total += file.cost;
+	}
+
+	for (const path of Array.from(fileCostCache.keys())) {
+		if (!seen.has(path)) fileCostCache.delete(path);
+	}
+
+	dailyCostDayStart = dayStart;
+	dailyCostCache = total;
+	dailyCostCacheAt = Date.now();
+	dailyCostRefreshError = undefined;
+	await savePersistentDailyCostCache();
+}
+
+function handleDailyDayChange(): boolean {
+	const start = todayStart();
+	if (start === dailyCostDayStart) return false;
+	dailyCostDayStart = start;
+	dailyCostCache = 0;
+	dailyCostCacheAt = 0;
+	fileCostCache.clear();
+	return true;
+}
+
+function scheduleDailyCostRefresh(requestRender?: () => void, force = false): void {
+	const dayChanged = handleDailyDayChange();
+	const now = Date.now();
+	if (dailyCostRefreshInFlight) return;
+	if (!force && !dayChanged && now - dailyCostCacheAt < DAILY_CACHE_MS) return;
+	if (!force && dailyCostRefreshError && now < dailyCostNextRetryAt) return;
+
+	dailyCostRefreshInFlight = true;
+	void refreshDailyCost()
+		.catch((error: unknown) => {
+			dailyCostRefreshError = error instanceof Error ? error.message : String(error);
+			dailyCostNextRetryAt = Date.now() + REFRESH_RETRY_MS;
+		})
+		.finally(() => {
+			dailyCostRefreshInFlight = false;
+			requestRender?.();
+		});
+}
+
+function computeSessionCost(ctx: ExtensionContext): number {
 	let cost = 0;
 	for (const entry of ctx.sessionManager.getEntries()) {
 		if (entry.type === "message" && entry.message.role === "assistant") {
@@ -95,63 +350,6 @@ function sumSessionCost(ctx: ExtensionContext): number {
 		}
 	}
 	return cost;
-}
-
-function todayStart(): number {
-	const d = new Date();
-	d.setHours(0, 0, 0, 0);
-	return d.getTime();
-}
-
-function timestampMs(value: unknown): number {
-	if (typeof value === "number") return value;
-	if (typeof value === "string") {
-		const parsed = Date.parse(value);
-		return Number.isFinite(parsed) ? parsed : 0;
-	}
-	return 0;
-}
-
-function* jsonlFiles(dir: string): Generator<string> {
-	if (!existsSync(dir)) return;
-	for (const ent of readdirSync(dir, { withFileTypes: true })) {
-		const p = join(dir, ent.name);
-		if (ent.isDirectory()) yield* jsonlFiles(p);
-		else if (ent.isFile() && ent.name.endsWith(".jsonl")) yield p;
-	}
-}
-
-let dailyCacheAt = 0;
-let dailyCache = 0;
-
-function getDailyCost(force = false): number {
-	const now = Date.now();
-	if (!force && now - dailyCacheAt < DAILY_CACHE_MS) return dailyCache;
-	const start = todayStart();
-	let total = 0;
-	try {
-		for (const file of jsonlFiles(SESSION_DIR)) {
-			const lines = readFileSync(file, "utf8").split("\n");
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const entry = JSON.parse(line);
-					if (entry?.type !== "message" || entry?.message?.role !== "assistant") continue;
-					const ts = timestampMs(entry.message.timestamp ?? entry.timestamp);
-					if (ts >= start) {
-						total += entry.message.usage?.cost?.total ?? 0;
-					}
-				} catch {
-					// Ignore malformed or future-format lines.
-				}
-			}
-		}
-	} catch {
-		// Keep footer rendering even if session scanning fails.
-	}
-	dailyCache = total;
-	dailyCacheAt = now;
-	return total;
 }
 
 function contextText(ctx: ExtensionContext): string {
@@ -187,14 +385,15 @@ function modelText(ctx: ExtensionContext, providerCount: number, thinkingLevel: 
 	return parts.join(" ");
 }
 
-function buildMainLeft(ctx: ExtensionContext, branch: string | null, commitCount: number | undefined, active: boolean): string {
+function buildMainLeft(ctx: ExtensionContext, branch: string | null, commitCount: number | undefined, active: boolean, requestRender?: () => void): string {
+	scheduleDailyCostRefresh(requestRender);
 	const branchText = branch ?? "no git";
 	const count = commitCount && commitCount > 0 ? ` (~${commitCount})` : "";
 	const marker = active ? "●" : "○";
 	const git = segment(`⎇ ${branchText}${count} ${marker}`, C.branchFg, C.branchBg);
 	const context = segment(contextText(ctx), C.contextFg, C.contextBg);
-	const session = segment(`§ ${formatCost(sumSessionCost(ctx))}`, C.sessionFg, C.sessionBg);
-	const today = segment(`☉ ${formatCost(getDailyCost())}`, C.todayFg, C.todayBg);
+	const session = segment(`§ ${formatCost(sessionCostCache)}`, C.sessionFg, C.sessionBg);
+	const today = segment(`☉ ${formatCost(dailyCostCache)}`, C.todayFg, C.todayBg);
 	return [
 		git,
 		powerline(C.branchBg, C.contextBg),
@@ -247,16 +446,20 @@ export default function (pi: ExtensionAPI) {
 	let currentThinkingLevel = "off";
 
 	function rerender(forceDaily = false) {
-		if (forceDaily) dailyCacheAt = 0;
+		if (forceDaily) scheduleDailyCostRefresh(requestRender, true);
 		requestRender?.();
 	}
 
 	function install(ctx: ExtensionContext) {
+		loadPersistentDailyCostCache();
+		sessionCostCache = computeSessionCost(ctx);
 		currentCwd = ctx.cwd;
 		currentThinkingLevel = pi.getThinkingLevel();
 		void refreshCommitCount(ctx.cwd, requestRender, (n) => (commitCount = n));
+		scheduleDailyCostRefresh(requestRender);
 		ctx.ui.setFooter((tui, _theme, footerData) => {
 			requestRender = () => tui.requestRender();
+			scheduleDailyCostRefresh(requestRender);
 			const unsub = footerData.onBranchChange(() => {
 				void refreshCommitCount(ctx.cwd, requestRender, (n) => (commitCount = n));
 				tui.requestRender();
@@ -266,7 +469,7 @@ export default function (pi: ExtensionAPI) {
 				dispose: unsub,
 				invalidate() {},
 				render(width: number): string[] {
-					const left = buildMainLeft(ctx, footerData.getGitBranch(), commitCount, active);
+					const left = buildMainLeft(ctx, footerData.getGitBranch(), commitCount, active, requestRender);
 					const right = modelText(ctx, footerData.getAvailableProviderCount(), currentThinkingLevel);
 					const oneLine = appendRight(left, right, width);
 					const lines: string[] = [];
@@ -281,9 +484,9 @@ export default function (pi: ExtensionAPI) {
 							powerline(C.contextBg),
 						].join("");
 						const spend = [
-							segment(`§ ${formatCost(sumSessionCost(ctx))}`, C.sessionFg, C.sessionBg),
+							segment(`§ ${formatCost(sessionCostCache)}`, C.sessionFg, C.sessionBg),
 							powerline(C.sessionBg, C.todayBg),
-							segment(`☉ ${formatCost(getDailyCost())}`, C.todayFg, C.todayBg),
+							segment(`☉ ${formatCost(dailyCostCache)}`, C.todayFg, C.todayBg),
 							powerline(C.todayBg),
 						].join("");
 						lines.push(truncateToWidth(branchAndContext, width, "…"));
@@ -313,8 +516,11 @@ export default function (pi: ExtensionAPI) {
 		active = false;
 		rerender(true);
 	});
-	pi.on("message_end", (_event, ctx) => {
+	pi.on("message_end", (event, ctx) => {
 		if (ctx.cwd !== currentCwd) currentCwd = ctx.cwd;
+		if (event.message.role === "assistant") {
+			sessionCostCache += ((event.message as AssistantMessage).usage?.cost?.total ?? 0);
+		}
 		rerender(true);
 	});
 	pi.on("model_select", () => rerender());
