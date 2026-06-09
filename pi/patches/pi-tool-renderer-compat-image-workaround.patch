@@ -1,0 +1,245 @@
+diff --git a/pi/extensions/pi-tool-renderer-compat.ts b/pi/extensions/pi-tool-renderer-compat.ts
+index 73d4c6b..322edcb 100644
+--- a/pi/extensions/pi-tool-renderer-compat.ts
++++ b/pi/extensions/pi-tool-renderer-compat.ts
+@@ -1,5 +1,5 @@
+ import { ToolExecutionComponent, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+-import { Text } from "@mariozechner/pi-tui";
++import { Image, Text } from "@mariozechner/pi-tui";
+ 
+ /**
+  * Compatibility layer for the package-installed @vanillagreen/pi-tool-renderer.
+@@ -21,7 +21,11 @@ import { Text } from "@mariozechner/pi-tui";
+  */
+ 
+ const SET_PLAN_TOOL_NAME = "set_plan";
++const TOOL_RENDERER_EXCLUDED_TOOL_NAMES = new Set(["view_image"]);
+ const PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.set-plan-result");
++const IMAGE_RENDER_PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.image-cursor-reservation");
++const TOOL_RENDERER_BYPASS_PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.tool-renderer-bypass");
++const VSTACK_TOOL_RENDERER_PATCH_SYMBOL = Symbol.for("vstack.pi-tool-renderer.tool-execution-renderer-patch.v2");
+ 
+ // Cursor native replay defaults to TTY-only. In cmux/other wrapped TUI
+ // environments stdout may not look like a TTY, which forces Cursor shell calls
+@@ -43,6 +47,13 @@ type PatchState = {
+ 	wrapper: GetResultRenderer;
+ };
+ 
++type ToolRendererBypassState = {
++	previousRender: (width: number) => string[];
++	previousGetCallRenderer?: GetResultRenderer;
++	previousGetResultRenderer?: GetResultRenderer;
++	wrapper: (width: number) => string[];
++};
++
+ type ToolResultLike = {
+ 	content?: Array<{ type?: string; text?: string }>;
+ 	details?: unknown;
+@@ -54,6 +65,37 @@ type ThemeLike = {
+ 	fg?: (role: string, text: string) => string;
+ };
+ 
++type ImageComponentLike = {
++	render: (width: number) => string[];
++	[IMAGE_RENDER_PATCH_SYMBOL]?: ImagePatchState;
++};
++
++type ImagePatchState = {
++	previousRender: (width: number) => string[];
++	wrapper: (width: number) => string[];
++};
++
++type ToolExecutionPrototypeLike = ToolExecutionComponentLike & {
++	render?: (width: number) => string[];
++	getCallRenderer?: GetResultRenderer;
++	getResultRenderer?: GetResultRenderer;
++	[TOOL_RENDERER_BYPASS_PATCH_SYMBOL]?: ToolRendererBypassState;
++	[VSTACK_TOOL_RENDERER_PATCH_SYMBOL]?: {
++		originalRender?: (this: ToolExecutionComponentLike, width: number) => string[];
++		originalGetCallRenderer?: GetResultRenderer;
++		originalGetResultRenderer?: GetResultRenderer;
++	};
++};
++
++function isRecursiveRendererCandidate(candidate: unknown, current: Function): boolean {
++	if (typeof candidate !== "function") return true;
++	if (candidate === current) return true;
++	// jiti/hot reloads can leave an older copy of this compatibility wrapper in
++	// @vanillagreen's saved "original" slot. It has the same function name but a
++	// different identity, so identity checks alone still recurse forever.
++	return candidate.name === current.name;
++}
++
+ function getPlanFromResult(result: ToolResultLike): string | undefined {
+ 	const details = result.details;
+ 	if (details && typeof details === "object" && "plan" in details) {
+@@ -82,14 +124,19 @@ function renderSetPlanResult(result: ToolResultLike, options: ToolResultOptionsL
+ }
+ 
+ function installSetPlanRendererPatch(pi: ExtensionAPI): void {
+-	const proto = ToolExecutionComponent?.prototype as unknown as ToolExecutionComponentLike & {
+-		getResultRenderer?: GetResultRenderer;
+-	};
++	const proto = ToolExecutionComponent?.prototype as unknown as ToolExecutionPrototypeLike;
+ 	if (!proto || typeof proto.getResultRenderer !== "function") return;
+ 	if (proto[PATCH_SYMBOL]) return;
+ 
+ 	const previousGetResultRenderer = proto.getResultRenderer;
+ 	const wrapper: GetResultRenderer = function patchedGetResultRenderer(this: ToolExecutionComponentLike) {
++		// Keep image-capable tools on Pi's native renderer path. Generic/custom
++		// result renderers flatten structured image content into text, which breaks
++		// inline previews for view_image rows.
++		if (typeof this.toolName === "string" && TOOL_RENDERER_EXCLUDED_TOOL_NAMES.has(this.toolName)) {
++			return undefined;
++		}
++
+ 		if (this.toolName !== SET_PLAN_TOOL_NAME) {
+ 			return previousGetResultRenderer.call(this);
+ 		}
+@@ -109,6 +156,73 @@ function installSetPlanRendererPatch(pi: ExtensionAPI): void {
+ 	});
+ }
+ 
++function installToolRendererBypassForExcludedTools(pi: ExtensionAPI, componentClass: unknown = ToolExecutionComponent): void {
++	const proto = (componentClass as { prototype?: unknown } | undefined)?.prototype as ToolExecutionPrototypeLike | undefined;
++	if (!proto || typeof proto.render !== "function") return;
++	if (proto[TOOL_RENDERER_BYPASS_PATCH_SYMBOL]) return;
++
++	const previousRender = proto.render;
++	const previousGetCallRenderer = proto.getCallRenderer;
++	const previousGetResultRenderer = proto.getResultRenderer;
++
++	if (typeof previousGetCallRenderer === "function") {
++		proto.getCallRenderer = function patchedGetCallRenderer(this: ToolExecutionComponentLike) {
++			if (typeof this.toolName === "string" && TOOL_RENDERER_EXCLUDED_TOOL_NAMES.has(this.toolName)) {
++				const original = proto[VSTACK_TOOL_RENDERER_PATCH_SYMBOL]?.originalGetCallRenderer;
++				// If this compatibility extension loads before @vanillagreen/pi-tool-renderer,
++				// its patch records this wrapper as the "original" renderer. Calling that
++				// recorded original for excluded tools re-enters this method forever. Prefer
++				// the true vstack original when available; otherwise fall back to the method
++				// that existed before this wrapper was installed.
++				if (!isRecursiveRendererCandidate(original, patchedGetCallRenderer)) {
++					return (original as GetResultRenderer).call(this);
++				}
++				return !isRecursiveRendererCandidate(previousGetCallRenderer, patchedGetCallRenderer)
++					? previousGetCallRenderer.call(this)
++					: undefined;
++			}
++			return previousGetCallRenderer.call(this);
++		};
++	}
++
++	if (typeof previousGetResultRenderer === "function") {
++		proto.getResultRenderer = function patchedGetResultRenderer(this: ToolExecutionComponentLike) {
++			if (typeof this.toolName === "string" && TOOL_RENDERER_EXCLUDED_TOOL_NAMES.has(this.toolName)) {
++				const original = proto[VSTACK_TOOL_RENDERER_PATCH_SYMBOL]?.originalGetResultRenderer;
++				if (!isRecursiveRendererCandidate(original, patchedGetResultRenderer)) {
++					return (original as GetResultRenderer).call(this);
++				}
++				return !isRecursiveRendererCandidate(previousGetResultRenderer, patchedGetResultRenderer)
++					? previousGetResultRenderer.call(this)
++					: undefined;
++			}
++			return previousGetResultRenderer.call(this);
++		};
++	}
++
++	const wrapper = function patchedToolExecutionRender(this: ToolExecutionComponentLike, width: number): string[] {
++		if (typeof this.toolName === "string" && TOOL_RENDERER_EXCLUDED_TOOL_NAMES.has(this.toolName)) {
++			const original = proto[VSTACK_TOOL_RENDERER_PATCH_SYMBOL]?.originalRender;
++			if (!isRecursiveRendererCandidate(original, patchedToolExecutionRender)) {
++				return (original as (this: ToolExecutionComponentLike, width: number) => string[]).call(this, width);
++			}
++		}
++		return previousRender.call(this, width);
++	};
++
++	proto.render = wrapper;
++	proto[TOOL_RENDERER_BYPASS_PATCH_SYMBOL] = { previousRender, previousGetCallRenderer, previousGetResultRenderer, wrapper };
++
++	pi.on("session_shutdown", () => {
++		const current = proto[TOOL_RENDERER_BYPASS_PATCH_SYMBOL];
++		if (!current || proto.render !== current.wrapper) return;
++		proto.render = current.previousRender;
++		if (current.previousGetCallRenderer) proto.getCallRenderer = current.previousGetCallRenderer;
++		if (current.previousGetResultRenderer) proto.getResultRenderer = current.previousGetResultRenderer;
++		delete proto[TOOL_RENDERER_BYPASS_PATCH_SYMBOL];
++	});
++}
++
+ function normalizeBashCommandArg(args: Record<string, unknown>): void {
+ 	if (typeof args.command === "string" && args.command.trim()) return;
+ 	const cmd = args.cmd;
+@@ -148,7 +262,72 @@ function installToolBatchBashArgsPatch(pi: ExtensionAPI): void {
+ 	});
+ }
+ 
++function lineContainsInlineImage(line: string): boolean {
++	return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
++}
++
++function normalizeInlineImageCursorReservation(lines: string[]): string[] {
++	const imageLineIndex = lines.findIndex(lineContainsInlineImage);
++	if (imageLineIndex === -1 || lines.length <= 1) return lines;
++
++	const rowsBelowImageLine = lines.length - 1 - imageLineIndex;
++	if (rowsBelowImageLine <= 0) return lines;
++
++	// Newer Kitty rendering emits the image sequence first followed by blank
++	// reservation rows. @vanillagreen/pi-tool-renderer trims outer blank lines,
++	// which discards those trailing rows. Keep the image sequence in place (so
++	// the terminal still sees a plain graphics escape) and replace the blank
++	// reservation rows with a zero-width cursor-position escape that pi-tui's
++	// wrapping code understands. @vanillagreen's blank-line trimmer does not
++	// strip CSI-G, so the rows survive without being rendered as visible text.
++	const patched = [...lines];
++	for (let i = imageLineIndex + 1; i < patched.length; i++) {
++		if (patched[i] === "") patched[i] = "\x1b[1G";
++	}
++	return patched;
++}
++
++function installImageCursorReservationPatch(pi: ExtensionAPI, imageClass: unknown = Image): void {
++	const proto = (imageClass as { prototype?: unknown } | undefined)?.prototype as ImageComponentLike | undefined;
++	if (!proto || typeof proto.render !== "function") return;
++	if (proto[IMAGE_RENDER_PATCH_SYMBOL]) return;
++
++	const previousRender = proto.render;
++	const wrapper = function patchedImageRender(this: ImageComponentLike, width: number): string[] {
++		const lines = previousRender.call(this, width);
++		return normalizeInlineImageCursorReservation(lines);
++	};
++
++	proto.render = wrapper;
++	proto[IMAGE_RENDER_PATCH_SYMBOL] = { previousRender, wrapper };
++
++	pi.on("session_shutdown", () => {
++		const current = proto[IMAGE_RENDER_PATCH_SYMBOL];
++		if (!current || proto.render !== current.wrapper) return;
++		proto.render = current.previousRender;
++		delete proto[IMAGE_RENDER_PATCH_SYMBOL];
++	});
++}
++
+ export default function (pi: ExtensionAPI) {
+ 	installSetPlanRendererPatch(pi);
+ 	installToolBatchBashArgsPatch(pi);
++	installToolRendererBypassForExcludedTools(pi);
++	installImageCursorReservationPatch(pi);
++
++	// Some package-installed extensions patch the @earendil-works package namespace
++	// while this repo's local dev dependency is @mariozechner. Patch that runtime
++	// instance too when present; use dynamic import so local typecheck does not
++	// require the global package to be installed in ./pi/node_modules.
++	void (async () => {
++		try {
++			const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
++			const agent = await dynamicImport("@earendil-works/pi-coding-agent");
++			if (agent?.ToolExecutionComponent) installToolRendererBypassForExcludedTools(pi, agent.ToolExecutionComponent);
++			const tui = await dynamicImport("@earendil-works/pi-tui");
++			if (tui?.Image) installImageCursorReservationPatch(pi, tui.Image);
++		} catch {
++			// Optional compatibility path only.
++		}
++	})();
+ }
