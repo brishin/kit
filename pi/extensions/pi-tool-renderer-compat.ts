@@ -1,5 +1,5 @@
 import { ToolExecutionComponent, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Container, Text } from "@mariozechner/pi-tui";
+import { Container, Image, Text } from "@mariozechner/pi-tui";
 
 /**
  * Compatibility layer for the package-installed @vanillagreen/pi-tool-renderer.
@@ -25,6 +25,7 @@ const TOOL_RENDERER_EXCLUDED_TOOL_NAMES = new Set(["view_image"]);
 const PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.set-plan-result");
 const TOOL_RENDERER_BYPASS_PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.tool-renderer-bypass");
 const CONTAINER_CHROME_BYPASS_PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.container-chrome-bypass");
+const IMAGE_RESERVATION_PATCH_SYMBOL = Symbol.for("kit.pi-tool-renderer-compat.image-reservation");
 const VSTACK_TOOL_RENDERER_PATCH_SYMBOL = Symbol.for("vstack.pi-tool-renderer.tool-execution-renderer-patch.v2");
 
 // Cursor native replay defaults to TTY-only. In cmux/other wrapped TUI
@@ -74,14 +75,24 @@ type ToolRendererBypassState = {
 
 type ContainerLike = {
 	toolName?: unknown;
+	children?: Array<{ render?: (width: number) => string[] }>;
 	render: (width: number) => string[];
 	[CONTAINER_CHROME_BYPASS_PATCH_SYMBOL]?: ContainerChromeBypassState;
 };
 
 type ContainerChromeBypassState = {
 	previousRender: (this: ContainerLike, width: number) => string[];
-	nativeRender: (this: ContainerLike, width: number) => string[];
 	wrapper: (this: ContainerLike, width: number) => string[];
+};
+
+type ImageLike = {
+	render: (width: number) => string[];
+	[IMAGE_RESERVATION_PATCH_SYMBOL]?: ImageReservationPatchState;
+};
+
+type ImageReservationPatchState = {
+	previousRender: (this: ImageLike, width: number) => string[];
+	wrapper: (this: ImageLike, width: number) => string[];
 };
 
 type PatchState = {
@@ -120,6 +131,20 @@ function chooseNative<T extends Function>(preferred: unknown, fallback: unknown,
 	if (!isRecursiveRendererCandidate(preferred, current)) return preferred as T;
 	if (!isRecursiveRendererCandidate(fallback, current)) return fallback as T;
 	return undefined;
+}
+
+function lineContainsInlineImage(line: string): boolean {
+	return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
+}
+
+function preserveImageReservationRows(lines: string[]): string[] {
+	if (!lines.some(lineContainsInlineImage)) return lines;
+	// Pi's Image component reserves terminal height with blank rows. The chrome
+	// renderer treats those as trim-able outer whitespace, so an image can render
+	// correctly while the following rule/text is painted too soon. Replace only
+	// reservation blanks with a zero-width cursor-position escape that pi-tui's
+	// width code understands but @vanillagreen's blank-line trimmer preserves.
+	return lines.map((line) => (line === "" ? "\x1b[1G" : line));
 }
 
 function getPlanFromResult(result: ToolResultLike): string | undefined {
@@ -287,20 +312,51 @@ function installContainerChromeBypassForExcludedTools(pi: ExtensionAPI, containe
 	if (existing && proto.render === existing.wrapper) return;
 
 	const previousRender = proto.render;
-	const nativeRender = existing?.nativeRender ?? previousRender;
 	const wrapper = function patchedContainerToolChromeRender(this: ContainerLike, width: number): string[] {
-		if (isExcludedTool(this)) return nativeRender.call(this, width);
+		if (isExcludedTool(this)) {
+			// @vanillagreen's Container patch does not expose its saved native
+			// Container.render. Reimplement the tiny native Container renderer here so
+			// view_image rows keep Pi's image reservation blank lines instead of having
+			// them trimmed as chrome whitespace.
+			const lines: string[] = [];
+			for (const child of this.children ?? []) {
+				const childLines = typeof child.render === "function" ? child.render(width) : [];
+				for (const line of childLines) lines.push(line);
+			}
+			return lines;
+		}
 		return previousRender.call(this, width);
 	};
 
 	proto.render = wrapper;
-	proto[CONTAINER_CHROME_BYPASS_PATCH_SYMBOL] = { previousRender, nativeRender, wrapper };
+	proto[CONTAINER_CHROME_BYPASS_PATCH_SYMBOL] = { previousRender, wrapper };
 
 	pi.on("session_shutdown", () => {
 		const current = proto[CONTAINER_CHROME_BYPASS_PATCH_SYMBOL];
 		if (!current || proto.render !== current.wrapper) return;
 		proto.render = current.previousRender;
 		delete proto[CONTAINER_CHROME_BYPASS_PATCH_SYMBOL];
+	});
+}
+
+function installImageReservationPatch(pi: ExtensionAPI, imageClass: unknown = Image): void {
+	const proto = (imageClass as { prototype?: unknown } | undefined)?.prototype as ImageLike | undefined;
+	if (!proto || typeof proto.render !== "function") return;
+	if (proto[IMAGE_RESERVATION_PATCH_SYMBOL]) return;
+
+	const previousRender = proto.render;
+	const wrapper = function patchedImageReservationRender(this: ImageLike, width: number): string[] {
+		return preserveImageReservationRows(previousRender.call(this, width));
+	};
+
+	proto.render = wrapper;
+	proto[IMAGE_RESERVATION_PATCH_SYMBOL] = { previousRender, wrapper };
+
+	pi.on("session_shutdown", () => {
+		const current = proto[IMAGE_RESERVATION_PATCH_SYMBOL];
+		if (!current || proto.render !== current.wrapper) return;
+		proto.render = current.previousRender;
+		delete proto[IMAGE_RESERVATION_PATCH_SYMBOL];
 	});
 }
 
@@ -348,6 +404,7 @@ export default function (pi: ExtensionAPI) {
 	installToolBatchBashArgsPatch(pi);
 	installToolRendererBypassForExcludedTools(pi);
 	installContainerChromeBypassForExcludedTools(pi);
+	installImageReservationPatch(pi);
 
 	// @vanillagreen patches the package-installed @earendil namespace, while
 	// this repo typechecks against @mariozechner. Patch both, and run once on the
@@ -360,6 +417,7 @@ export default function (pi: ExtensionAPI) {
 			if (agent?.ToolExecutionComponent) installToolRendererBypassForExcludedTools(pi, agent.ToolExecutionComponent);
 			const tui = await dynamicImport("@earendil-works/pi-tui");
 			if (tui?.Container) installContainerChromeBypassForExcludedTools(pi, tui.Container);
+			if (tui?.Image) installImageReservationPatch(pi, tui.Image);
 		} catch {
 			// Optional runtime namespace only.
 		}
