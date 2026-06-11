@@ -39,6 +39,23 @@ linear comment create FLA-991 -m "Done!"    # Add comment
 LINEAR_API_KEY="lin_api_..."
 ```
 
+### `richpaste` — Markdown Clipboard → Rich Text
+
+Reads markdown from the clipboard and writes back HTML + RTF + plain-text flavors so
+the next paste lands as formatted rich text in tools that don't understand markdown —
+Slack (via HTML), Notes/Mail (via RTF), Gmail, Google Docs, etc. Inline code and fenced
+code blocks survive into Slack.
+
+```bash
+richpaste                 # copy markdown -> run -> paste rich text
+richpaste --font Menlo --size 14
+```
+
+**Setup:** Symlink onto your `PATH` (macOS only):
+```bash
+ln -s ~/Programming/kit/richpaste ~/.local/bin/richpaste
+```
+
 ## Claude Code Plugin
 
 This repo also provides Claude Code skills for development workflows.

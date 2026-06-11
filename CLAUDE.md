@@ -117,6 +117,35 @@ linear issue update FLA-991 --state "In Progress"
 linear comment create FLA-991 -m "Working on this"
 ```
 
+## Additional Tool: `richpaste`
+
+A macOS-only CLI that converts markdown on the clipboard into rich text, in place,
+so it can be pasted into tools that don't understand markdown (email, Slack, Notes,
+Google Docs).
+
+### Behavior
+
+- Reads plain-text markdown from the general `NSPasteboard`
+- Renders it to HTML via the `markdown` library (`extra`, `sane_lists`, `nl2br`), then
+  to RTF via `NSAttributedString`
+- Writes three flavors so each target picks the richest it reads: HTML
+  (`NSPasteboardTypeHTML`, what web/Electron editors like Slack paste from), RTF
+  (`NSPasteboardTypeRTF`, native macOS apps), and plain text (`NSPasteboardTypeString`)
+- Exits non-zero if the clipboard has no text
+
+### Implementation Notes
+
+- Uses `pyobjc-framework-Cocoa` (AppKit/Foundation) — no shell-outs to `textutil`
+- `--font` / `--size` override the default body font injected into the HTML so the
+  RTF doesn't import as Times New Roman; `--print` dumps the generated HTML to stderr
+
+### Quick Start
+
+```bash
+# copy markdown -> run -> paste rich text
+richpaste
+```
+
 ## Setup
 
 ### Installation
@@ -161,6 +190,7 @@ This pattern allows:
 
 - `wt` - Unified Python CLI (main tool)
 - `linear` - Linear GraphQL CLI
+- `richpaste` - Markdown clipboard → rich text (RTF) converter (macOS)
 - `pi/extensions/` - pi coding agent harness TypeScript extensions (`cmux.ts`, `usage-footer.ts`)
 - `skills/` - Claude Code plugin skills (web-researcher, graphite, pr-comments, etc.)
 - `wt-create` - Legacy Python script (deprecated, superseded by `wt create`)

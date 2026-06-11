@@ -1,0 +1,133 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "markdown",
+#   "pyobjc-framework-Cocoa",
+#   "click",
+# ]
+# ///
+"""
+richpaste - Convert markdown on the clipboard to rich text, in place.
+
+Reads the markdown text currently on the macOS pasteboard, converts it to RTF,
+and writes it back so the next paste lands as formatted rich text (bold,
+headings, lists, code, links, tables) in tools that don't understand markdown.
+
+Usage:
+  copy markdown -> run `richpaste` -> paste rich text
+
+Examples:
+  richpaste                # transform the clipboard in place
+  richpaste --print        # also dump the generated HTML to stderr
+  richpaste --font Menlo --size 14
+"""
+
+import sys
+
+import click
+import markdown
+from AppKit import (
+    NSAttributedString,
+    NSPasteboard,
+    NSPasteboardTypeHTML,
+    NSPasteboardTypeRTF,
+    NSPasteboardTypeString,
+)
+from Foundation import NSData
+
+
+def nsdata(text: str) -> NSData:
+    """Wrap a UTF-8 string as NSData."""
+    raw = text.encode("utf-8")
+    return NSData.dataWithBytes_length_(raw, len(raw))
+
+MARKDOWN_EXTENSIONS = ["extra", "sane_lists", "nl2br"]
+
+
+def read_clipboard_text(pb: NSPasteboard) -> str | None:
+    """Return the plain-text contents of the pasteboard, or None if empty."""
+    text = pb.stringForType_(NSPasteboardTypeString)
+    if text is None:
+        return None
+    text = str(text)
+    return text if text.strip() else None
+
+
+def markdown_to_html(md_text: str, font: str, size: int) -> str:
+    """Render markdown to a styled HTML document."""
+    body = markdown.markdown(md_text, extensions=MARKDOWN_EXTENSIONS)
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>"
+        f"body {{ font-family: '{font}', -apple-system, Helvetica, sans-serif;"
+        f" font-size: {size}px; }}"
+        " code, pre { font-family: 'SF Mono', Menlo, monospace;"
+        " background-color: #f4f4f4; }"
+        " code { padding: 0 2px; }"
+        " pre { white-space: pre; padding: 8px; }"
+        " pre code { background-color: transparent; padding: 0; }"
+        "</style></head><body>"
+        f"{body}"
+        "</body></html>"
+    )
+
+
+def html_to_attributed_string(html: str) -> NSAttributedString:
+    """Build an NSAttributedString from an HTML document string."""
+    attr_string, _ = NSAttributedString.alloc().initWithHTML_documentAttributes_(
+        nsdata(html), None
+    )
+    if attr_string is None:
+        raise RuntimeError("Failed to parse HTML into an attributed string")
+    return attr_string
+
+
+@click.command()
+@click.option("--font", default="Helvetica", help="Default font family (default: Helvetica)")
+@click.option("--size", default=13, type=int, help="Default font size in px (default: 13)")
+@click.option("--print", "print_html", is_flag=True, help="Dump generated HTML to stderr")
+def cli(font: str, size: int, print_html: bool) -> None:
+    """Convert markdown on the clipboard to rich text, in place.
+
+    Copy markdown text, run `richpaste`, then paste into any rich-text target
+    (email, Slack, Notes, Google Docs) to get real formatting instead of raw
+    markdown markup.
+    """
+    pb = NSPasteboard.generalPasteboard()
+
+    md_text = read_clipboard_text(pb)
+    if md_text is None:
+        click.echo("✗ Clipboard is empty or has no text to convert.", err=True)
+        sys.exit(1)
+
+    html = markdown_to_html(md_text, font, size)
+    if print_html:
+        click.echo(html, err=True)
+
+    attr_string = html_to_attributed_string(html)
+    full_range = (0, attr_string.length())
+    rtf_data = attr_string.RTFFromRange_documentAttributes_(full_range, None)
+    if rtf_data is None:
+        click.echo("✗ Failed to generate RTF from the converted markdown.", err=True)
+        sys.exit(1)
+
+    plain_fallback = str(attr_string.string())
+
+    # Write three flavors so each target picks the richest it understands:
+    #   HTML  -> web / Electron editors (Slack, Notion, Gmail) read text/html on paste
+    #   RTF   -> native macOS apps (TextEdit, Mail, Notes)
+    #   plain -> de-marked-up fallback for plain-text-only targets
+    pb.clearContents()
+    pb.declareTypes_owner_(
+        [NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypeString], None
+    )
+    pb.setData_forType_(nsdata(html), NSPasteboardTypeHTML)
+    pb.setData_forType_(rtf_data, NSPasteboardTypeRTF)
+    pb.setString_forType_(plain_fallback, NSPasteboardTypeString)
+
+    click.echo(f"✓ Clipboard converted to rich text ({len(md_text)} chars in).")
+
+
+if __name__ == "__main__":
+    cli()
