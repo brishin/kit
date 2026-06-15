@@ -385,13 +385,12 @@ function modelText(ctx: ExtensionContext, providerCount: number, thinkingLevel: 
 	return parts.join(" ");
 }
 
-function buildMainLeft(ctx: ExtensionContext, branch: string | null, commitCount: number | undefined, active: boolean, requestRender?: () => void): string {
-	scheduleDailyCostRefresh(requestRender);
+function buildMainLeft(contextUsageText: string, branch: string | null, commitCount: number | undefined, active: boolean): string {
 	const branchText = branch ?? "no git";
 	const count = commitCount && commitCount > 0 ? ` (~${commitCount})` : "";
 	const marker = active ? "●" : "○";
 	const git = segment(`⎇ ${branchText}${count} ${marker}`, C.branchFg, C.branchBg);
-	const context = segment(contextText(ctx), C.contextFg, C.contextBg);
+	const context = segment(contextUsageText, C.contextFg, C.contextBg);
 	const session = segment(`§ ${formatCost(sessionCostCache)}`, C.sessionFg, C.sessionBg);
 	const today = segment(`☉ ${formatCost(dailyCostCache)}`, C.todayFg, C.todayBg);
 	return [
@@ -444,6 +443,11 @@ export default function (pi: ExtensionAPI) {
 	let requestRender: (() => void) | undefined;
 	let currentCwd: string | undefined;
 	let currentThinkingLevel = "off";
+	let currentContextText = "▫".repeat(BAR_WIDTH) + " ?/0";
+
+	function refreshContextText(ctx: ExtensionContext) {
+		currentContextText = contextText(ctx);
+	}
 
 	function rerender(forceDaily = false) {
 		if (forceDaily) scheduleDailyCostRefresh(requestRender, true);
@@ -453,6 +457,7 @@ export default function (pi: ExtensionAPI) {
 	function install(ctx: ExtensionContext) {
 		loadPersistentDailyCostCache();
 		sessionCostCache = computeSessionCost(ctx);
+		refreshContextText(ctx);
 		currentCwd = ctx.cwd;
 		currentThinkingLevel = pi.getThinkingLevel();
 		void refreshCommitCount(ctx.cwd, requestRender, (n) => (commitCount = n));
@@ -469,7 +474,7 @@ export default function (pi: ExtensionAPI) {
 				dispose: unsub,
 				invalidate() {},
 				render(width: number): string[] {
-					const left = buildMainLeft(ctx, footerData.getGitBranch(), commitCount, active, requestRender);
+					const left = buildMainLeft(currentContextText, footerData.getGitBranch(), commitCount, active);
 					const right = modelText(ctx, footerData.getAvailableProviderCount(), currentThinkingLevel);
 					const oneLine = appendRight(left, right, width);
 					const lines: string[] = [];
@@ -480,7 +485,7 @@ export default function (pi: ExtensionAPI) {
 						const branchAndContext = [
 							segment(`⎇ ${footerData.getGitBranch() ?? "no git"}${commitCount && commitCount > 0 ? ` (~${commitCount})` : ""} ${active ? "●" : "○"}`, C.branchFg, C.branchBg),
 							powerline(C.branchBg, C.contextBg),
-							segment(contextText(ctx), C.contextFg, C.contextBg),
+							segment(currentContextText, C.contextFg, C.contextBg),
 							powerline(C.contextBg),
 						].join("");
 						const spend = [
@@ -518,12 +523,16 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event, ctx) => {
 		if (ctx.cwd !== currentCwd) currentCwd = ctx.cwd;
+		refreshContextText(ctx);
 		if (event.message.role === "assistant") {
 			sessionCostCache += ((event.message as AssistantMessage).usage?.cost?.total ?? 0);
 		}
 		rerender(true);
 	});
-	pi.on("model_select", () => rerender());
+	pi.on("model_select", (_event, ctx) => {
+		refreshContextText(ctx);
+		rerender();
+	});
 	pi.on("thinking_level_select", (event) => {
 		currentThinkingLevel = event.level;
 		rerender();
