@@ -23,6 +23,7 @@ Examples:
   richpaste --font Menlo --size 14
 """
 
+import re
 import sys
 
 import click
@@ -44,6 +45,32 @@ def nsdata(text: str) -> NSData:
 
 MARKDOWN_EXTENSIONS = ["extra", "sane_lists", "nl2br"]
 
+# Heading font size as a multiple of the body size, h1 -> h6.
+HEADING_SCALES = (1.6, 1.4, 1.2, 1.1, 1.0, 1.0)
+
+HEADING_RE = re.compile(r"(<h([1-6])(?:\s[^>]*)?>)(.*?)(</h\2>)", re.DOTALL)
+
+
+def bolden_headings(html_body: str) -> str:
+    """Wrap heading contents in <strong>.
+
+    Targets that strip <h1>-<h6> on paste (Slack, some mail composers) otherwise
+    drop the emphasis entirely; an inline <strong> survives that flattening.
+    """
+    return HEADING_RE.sub(lambda m: f"{m[1]}<strong>{m[3]}</strong>{m[4]}", html_body)
+
+
+def heading_css(size: int) -> str:
+    """CSS making every heading level explicitly bold and sized off the body font."""
+    rules = [
+        f" h{level} {{ font-weight: 700; font-size: {round(size * scale)}px;"
+        " margin: 0.6em 0 0.3em; }"
+        for level, scale in enumerate(HEADING_SCALES, start=1)
+    ]
+    rules.append(" h1 strong, h2 strong, h3 strong, h4 strong, h5 strong, h6 strong"
+                 " { font-weight: 700; }")
+    return "".join(rules)
+
 
 def read_clipboard_text(pb: NSPasteboard) -> str | None:
     """Return the plain-text contents of the pasteboard, or None if empty."""
@@ -56,12 +83,13 @@ def read_clipboard_text(pb: NSPasteboard) -> str | None:
 
 def markdown_to_html(md_text: str, font: str, size: int) -> str:
     """Render markdown to a styled HTML document."""
-    body = markdown.markdown(md_text, extensions=MARKDOWN_EXTENSIONS)
+    body = bolden_headings(markdown.markdown(md_text, extensions=MARKDOWN_EXTENSIONS))
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<style>"
         f"body {{ font-family: '{font}', -apple-system, Helvetica, sans-serif;"
         f" font-size: {size}px; }}"
+        f"{heading_css(size)}"
         " code, pre { font-family: 'SF Mono', Menlo, monospace;"
         " background-color: #f4f4f4; }"
         " code { padding: 0 2px; }"
