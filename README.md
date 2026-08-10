@@ -22,6 +22,10 @@ wt() {
 }
 ```
 
+When launched from an active Herdr pane, `wt create` opens and focuses a Herdr
+workspace for the new worktree, then starts `cl` or `pi` there. Outside Herdr,
+the shell-wrapper behavior above is unchanged.
+
 ### `linear` — Linear CLI
 
 Interact with Linear issues from the command line.
@@ -75,6 +79,7 @@ This repo also provides Claude Code skills for development workflows.
 - [uv](https://github.com/astral-sh/uv) (dependencies auto-install)
 - [gh](https://cli.github.com/) (for `wt cleanup` PR checks)
 - [gt](https://graphite.dev/docs/graphite-cli) (optional, for stacked PRs)
+- [Herdr](https://herdr.dev/) (optional, for workspace-aware `wt create`)
 
 ## Development
 

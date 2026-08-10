@@ -29,8 +29,11 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from enum import Enum, auto
 from pathlib import Path
 
 import click
@@ -108,6 +111,227 @@ def run_command_in_dir(cmd, cwd, capture=True, check=True):
         if check:
             return None
         return e.stdout.strip() if e.stdout else None
+
+
+class WorktreeTransition(Enum):
+    """How a terminal handler leaves the caller after creating a worktree."""
+
+    SHELL = auto()
+    TERMINAL = auto()
+
+
+class TerminalHandler(ABC):
+    """Own the terminal-specific parts of a worktree lifecycle."""
+
+    @classmethod
+    @abstractmethod
+    def is_active(cls) -> bool:
+        """Return whether this handler owns the current terminal."""
+
+    @abstractmethod
+    def open_worktree(
+        self,
+        git_root: str,
+        worktree_dir: str,
+        label: str,
+        agent_command: str | None,
+    ) -> WorktreeTransition:
+        """Prepare the new worktree and report who performs the transition."""
+
+    @abstractmethod
+    def close_workspace(self) -> None:
+        """Close the current terminal workspace after cleanup."""
+
+
+class CmuxTerminalHandler(TerminalHandler):
+    """Keep cmux's companion-shell behavior while the caller changes directory."""
+
+    def __init__(self, workspace_id: str) -> None:
+        self.workspace_id = workspace_id
+
+    @classmethod
+    def is_active(cls) -> bool:
+        return bool(
+            os.environ.get("CMUX_WORKSPACE_ID")
+            and run_command("command -v cmux", check=False)
+        )
+
+    @classmethod
+    def current(cls) -> "CmuxTerminalHandler | None":
+        workspace_id = os.environ.get("CMUX_WORKSPACE_ID")
+        if not workspace_id or not cls.is_active():
+            return None
+        return cls(workspace_id)
+
+    def open_worktree(
+        self,
+        git_root: str,
+        worktree_dir: str,
+        label: str,
+        agent_command: str | None,
+    ) -> WorktreeTransition:
+        run_command(
+            f"cmux rename-workspace {label!r} --workspace {shlex.quote(self.workspace_id)}",
+            check=False,
+        )
+        split_out = run_command("cmux new-split right --focus false", check=False)
+        new_surface = None
+        if split_out:
+            for token in split_out.split():
+                if token.startswith("surface:"):
+                    new_surface = token
+                    break
+        if new_surface:
+            payload = f"cd {shlex.quote(worktree_dir)}\n"
+            run_command(
+                f"cmux send --surface {new_surface} {shlex.quote(payload)}",
+                check=False,
+            )
+        return WorktreeTransition.SHELL
+
+    def close_workspace(self) -> None:
+        run_command(
+            f"cmux close-workspace --workspace {shlex.quote(self.workspace_id)}",
+            check=False,
+        )
+
+
+class HerdrTerminalHandler(TerminalHandler):
+    """Open worktrees in Herdr workspaces and launch the requested agent there."""
+
+    COMMAND_TIMEOUT_SECONDS = 2
+
+    @staticmethod
+    def _run(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                ["herdr", *args],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=HerdrTerminalHandler.COMMAND_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    @classmethod
+    def is_active(cls) -> bool:
+        if os.environ.get("HERDR_ENV") != "1" or not shutil.which("herdr"):
+            return False
+        result = cls._run(["status", "server"])
+        return result is not None and result.returncode == 0
+
+    @classmethod
+    def current(cls) -> "HerdrTerminalHandler | None":
+        if not cls.is_active():
+            return None
+        return cls()
+
+    def _json_result(self, args: list[str]) -> dict | None:
+        result = self._run(args)
+        if result is None or result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        result_data = data.get("result") if isinstance(data, dict) else None
+        return result_data if isinstance(result_data, dict) else None
+
+    def _close_workspace(self, workspace_id: str) -> None:
+        self._run(["workspace", "close", workspace_id])
+
+    def _abort_open(self, workspace_id: str, created_workspace: bool) -> WorktreeTransition:
+        if created_workspace:
+            self._close_workspace(workspace_id)
+        return WorktreeTransition.SHELL
+
+    def open_worktree(
+        self,
+        git_root: str,
+        worktree_dir: str,
+        label: str,
+        agent_command: str | None,
+    ) -> WorktreeTransition:
+        result = self._json_result(
+            [
+                "worktree",
+                "open",
+                "--cwd",
+                git_root,
+                "--path",
+                worktree_dir,
+                "--label",
+                label,
+                "--no-focus",
+            ]
+        )
+        if not result or result.get("type") != "worktree_opened":
+            return WorktreeTransition.SHELL
+
+        workspace = result.get("workspace")
+        workspace_id = (
+            workspace.get("workspace_id") if isinstance(workspace, dict) else None
+        )
+        created_workspace = not result.get("already_open", False)
+        if not workspace_id:
+            return WorktreeTransition.SHELL
+
+        if result.get("already_open", False):
+            focus_result = self._run(["workspace", "focus", workspace_id])
+            return (
+                WorktreeTransition.TERMINAL
+                if focus_result is not None and focus_result.returncode == 0
+                else WorktreeTransition.SHELL
+            )
+
+        focus_result = self._run(["workspace", "focus", workspace_id])
+        if focus_result is None or focus_result.returncode != 0:
+            return self._abort_open(workspace_id, created_workspace)
+
+        panes_result = self._json_result(["pane", "list", "--workspace", workspace_id])
+        panes = panes_result.get("panes") if isinstance(panes_result, dict) else None
+        active_tab_id = (
+            workspace.get("active_tab_id") if isinstance(workspace, dict) else None
+        )
+        pane = next(
+            (
+                item
+                for item in panes
+                if isinstance(item, dict)
+                and item.get("tab_id") == active_tab_id
+                and item.get("pane_id")
+            ),
+            None,
+        ) if isinstance(panes, list) else None
+        if not pane:
+            return self._abort_open(workspace_id, created_workspace)
+
+        if agent_command:
+            agent_result = self._run(["pane", "run", pane["pane_id"], agent_command])
+            if agent_result is None or agent_result.returncode != 0:
+                return self._abort_open(workspace_id, created_workspace)
+
+        return WorktreeTransition.TERMINAL
+
+    def close_workspace(self) -> None:
+        result = self._json_result(["pane", "current", "--current"])
+        pane = result.get("pane") if isinstance(result, dict) else None
+        workspace_id = pane.get("workspace_id") if isinstance(pane, dict) else None
+        if workspace_id:
+            self._close_workspace(workspace_id)
+
+
+def current_terminal_handler() -> TerminalHandler | None:
+    """Return the active terminal owner, preferring Herdr over cmux."""
+    return HerdrTerminalHandler.current() or CmuxTerminalHandler.current()
+
+
+def close_current_terminal_workspace() -> None:
+    """Close the active terminal workspace after deleting its worktree."""
+    handler = current_terminal_handler()
+    if handler:
+        handler.close_workspace()
 
 
 def setup_mise(worktree_dir, out):
@@ -385,18 +609,6 @@ def create(branch_name, prefix, base, remote, hook, no_cl, launch_pi):
     print(f"✅ Worktree created at {worktree_dir}", file=out)
     print(f"   Branch: {full_branch}", file=out)
 
-    # Try to rename the cmux workspace to match the branch name (best-effort)
-    cmux_workspace = os.environ.get("CMUX_WORKSPACE_ID")
-    if cmux_workspace and run_command("command -v cmux", check=False):
-        # Use branch name without prefix for a cleaner sidebar label
-        # Translate dashes to spaces and title case for readability
-        label = branch_base if not remote else branch_name
-        label = label.replace("-", " ").title()
-        run_command(
-            f"cmux rename-workspace {label!r} --workspace {cmux_workspace}",
-            check=False,
-        )
-
     # Check if gt CLI is available and track the branch (only for non-remote branches)
     # Skip in hook mode — ephemeral worktrees don't need Graphite tracking
     if not hook and not remote and run_command("command -v gt", check=False):
@@ -412,36 +624,27 @@ def create(branch_name, prefix, base, remote, hook, no_cl, launch_pi):
         print(worktree_dir, file=_real_stdout)
     else:
         print("   Changing directory...", file=out)
+        label = branch_name if remote else branch_base
+        label = label.replace("-", " ").title()
+        agent_command = None if no_cl else ("pi" if launch_pi else "cl")
+        handler = current_terminal_handler()
+        transition = (
+            handler.open_worktree(git_root, worktree_dir, label, agent_command)
+            if handler
+            else WorktreeTransition.SHELL
+        )
 
-        # Spawn a right split with a plain shell in the worktree, alongside
-        # the Claude session that will live in the current (left) pane.
-        if cmux_workspace and run_command("command -v cmux", check=False):
-            # --focus false keeps focus on the caller's pane; the new split
-            # is created in the background so we don't yank the user away.
-            split_out = run_command("cmux new-split right --focus false", check=False)
-            new_surface = None
-            if split_out:
-                for token in split_out.split():
-                    if token.startswith("surface:"):
-                        new_surface = token
-                        break
-            if new_surface:
-                payload = f"cd {shlex.quote(worktree_dir)}\n"
-                run_command(
-                    f"cmux send --surface {new_surface} {shlex.quote(payload)}",
-                    check=False,
-                )
-
-        # Output cd command to fd 3 for shell to eval
-        # worktree_dir is already an absolute path from os.path.join(git_root, ...)
-        try:
-            with open("/dev/fd/3", "w") as fd3:
-                fd3.write(f"cd '{worktree_dir}'\n")
-                if not no_cl:
-                    fd3.write("pi\n" if launch_pi else "cl\n")
-        except (OSError, IOError):
-            # fd 3 not available, output to stderr as fallback
-            print(f"cd '{worktree_dir}'", file=sys.stderr)
+        if transition is WorktreeTransition.SHELL:
+            # Output cd command to fd 3 for shell to eval.
+            # worktree_dir is already an absolute path from os.path.join(git_root, ...)
+            try:
+                with open("/dev/fd/3", "w") as fd3:
+                    fd3.write(f"cd '{worktree_dir}'\n")
+                    if agent_command:
+                        fd3.write(f"{agent_command}\n")
+            except (OSError, IOError):
+                # fd 3 not available, output to stderr as fallback
+                print(f"cd '{worktree_dir}'", file=sys.stderr)
 
 
 def cleanup_derived_data(worktree_path: str) -> None:
@@ -635,19 +838,6 @@ def _cleanup_teardown(current_branch: str, wt_path: str) -> bool:
     cleanup_derived_data(wt_path)
     return True
 
-
-def _close_cmux_workspace() -> None:
-    """Close the current cmux workspace. Must be called last — terminates the shell."""
-    workspace = os.environ.get("CMUX_WORKSPACE_ID")
-    if not workspace:
-        return
-    if not run_command("command -v cmux", check=False):
-        return
-    run_command(
-        f"cmux close-workspace --workspace {shlex.quote(workspace)}", check=False
-    )
-
-
 @cli.command()
 @click.option("--hook", is_flag=True, hidden=True, help="Hook mode for Claude Code")
 def cleanup(hook):
@@ -725,7 +915,7 @@ def cleanup(hook):
         if not _cleanup_teardown(current_branch, wt_path):
             sys.exit(1)
         if not hook:
-            _close_cmux_workspace()
+            close_current_terminal_workspace()
         sys.exit(0)
 
     print(f"Found {unique_commits} unique commit(s) on this branch")
@@ -763,7 +953,7 @@ def cleanup(hook):
         if not _cleanup_teardown(current_branch, wt_path):
             sys.exit(1)
         if not hook:
-            _close_cmux_workspace()
+            close_current_terminal_workspace()
         sys.exit(0)
 
     # Extract PR details
@@ -782,7 +972,7 @@ def cleanup(hook):
     if not _cleanup_teardown(current_branch, wt_path):
         sys.exit(1)
     if not hook:
-        _close_cmux_workspace()
+        close_current_terminal_workspace()
 
 
 def _stash_current():
