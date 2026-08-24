@@ -24,9 +24,10 @@ def completed(args, payload=None, returncode=0):
 
 
 def test_herdr_opens_worktree_launches_agent_and_focuses(wt_module, monkeypatch):
+    monkeypatch.delenv("HERDR_WORKSPACE_ID", raising=False)
     calls = []
 
-    def run(args):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["worktree", "open"]:
             return completed(
@@ -76,10 +77,135 @@ def test_herdr_opens_worktree_launches_agent_and_focuses(wt_module, monkeypatch)
     ]
 
 
+def test_herdr_anchors_to_caller_workspace_env(wt_module, monkeypatch):
+    monkeypatch.setenv("HERDR_WORKSPACE_ID", "w1")
+    calls = []
+
+    def run(args, timeout=None):
+        calls.append(args)
+        if args[:2] == ["worktree", "open"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "worktree_opened",
+                        "already_open": False,
+                        "workspace": {"workspace_id": "w2", "active_tab_id": "w2:t1"},
+                    }
+                },
+            )
+        if args[:2] == ["pane", "list"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "pane_list",
+                        "panes": [{"pane_id": "w2:p1", "tab_id": "w2:t1"}],
+                    }
+                },
+            )
+        return completed(args)
+
+    monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
+
+    transition = wt_module.HerdrTerminalHandler().open_worktree(
+        "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
+    )
+
+    assert transition is wt_module.WorktreeTransition.TERMINAL
+    assert calls[0] == [
+        "worktree",
+        "open",
+        "--workspace",
+        "w1",
+        "--path",
+        "/repo/.worktrees/bs-feature",
+        "--label",
+        "Feature",
+        "--no-focus",
+    ]
+    assert not any("--cwd" in call for call in calls)
+
+
+def test_herdr_uses_longer_timeout_for_worktree_open(wt_module, monkeypatch):
+    monkeypatch.delenv("HERDR_WORKSPACE_ID", raising=False)
+    calls = []
+
+    def run(args, timeout=None):
+        calls.append((tuple(args[:2]), timeout))
+        if args[:2] == ["worktree", "open"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "worktree_opened",
+                        "already_open": False,
+                        "workspace": {"workspace_id": "w2", "active_tab_id": "w2:t1"},
+                    }
+                },
+            )
+        if args[:2] == ["pane", "list"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "pane_list",
+                        "panes": [{"pane_id": "w2:p1", "tab_id": "w2:t1"}],
+                    }
+                },
+            )
+        return completed(args)
+
+    monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
+
+    wt_module.HerdrTerminalHandler().open_worktree(
+        "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
+    )
+
+    timeouts = dict(calls)
+    assert (
+        timeouts[("worktree", "open")]
+        == wt_module.HerdrTerminalHandler.OPEN_TIMEOUT_SECONDS
+    )
+    assert timeouts[("workspace", "focus")] is None
+    assert timeouts[("pane", "list")] is None
+    assert timeouts[("pane", "run")] is None
+
+
+def test_herdr_open_timeout_returns_shell_cd_only(wt_module, monkeypatch):
+    monkeypatch.delenv("HERDR_WORKSPACE_ID", raising=False)
+    calls = []
+
+    def run(args, timeout=None):
+        calls.append(args)
+        return None
+
+    monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
+
+    transition = wt_module.HerdrTerminalHandler().open_worktree(
+        "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
+    )
+
+    assert transition is wt_module.WorktreeTransition.SHELL_CD_ONLY
+    assert calls == [
+        [
+            "worktree",
+            "open",
+            "--cwd",
+            "/repo",
+            "--path",
+            "/repo/.worktrees/bs-feature",
+            "--label",
+            "Feature",
+            "--no-focus",
+        ]
+    ]
+
+
 def test_herdr_closes_new_workspace_when_agent_cannot_start(wt_module, monkeypatch):
     calls = []
 
-    def run(args):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["worktree", "open"]:
             return completed(
@@ -112,7 +238,7 @@ def test_herdr_closes_new_workspace_when_agent_cannot_start(wt_module, monkeypat
         "/repo", "/repo/.worktrees/bs-feature", "Feature", "pi"
     )
 
-    assert transition is wt_module.WorktreeTransition.SHELL
+    assert transition is wt_module.WorktreeTransition.SHELL_CD_ONLY
     assert calls[-1] == ["workspace", "close", "w2"]
 
 
@@ -210,12 +336,8 @@ def test_cleanup_closes_the_active_terminal_workspace(wt_module, monkeypatch):
     assert handler.closed
 
 
-def test_herdr_focuses_existing_workspace_without_injecting_agent(
-    wt_module, monkeypatch
-):
-    calls = []
-
-    def run(args):
+def _already_open_run(calls, pane):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["worktree", "open"]:
             return completed(
@@ -228,6 +350,78 @@ def test_herdr_focuses_existing_workspace_without_injecting_agent(
                     }
                 },
             )
+        if args[:2] == ["pane", "list"]:
+            return completed(args, {"result": {"type": "pane_list", "panes": [pane]}})
+        return completed(args)
+
+    return run
+
+
+def test_herdr_launches_agent_in_existing_workspace_when_pane_idle(
+    wt_module, monkeypatch
+):
+    calls = []
+    run = _already_open_run(
+        calls, {"pane_id": "w2:p1", "tab_id": "w2:t1", "focused": True, "agent": None}
+    )
+    monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
+
+    transition = wt_module.HerdrTerminalHandler().open_worktree(
+        "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
+    )
+
+    assert transition is wt_module.WorktreeTransition.TERMINAL
+    assert ["pane", "run", "w2:p1", "cl"] in calls
+
+
+def test_herdr_skips_agent_when_existing_pane_already_runs_one(
+    wt_module, monkeypatch
+):
+    calls = []
+    run = _already_open_run(
+        calls,
+        {"pane_id": "w2:p1", "tab_id": "w2:t1", "focused": True, "agent": "claude"},
+    )
+    monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
+
+    transition = wt_module.HerdrTerminalHandler().open_worktree(
+        "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
+    )
+
+    assert transition is wt_module.WorktreeTransition.TERMINAL
+    assert not any(call[:2] == ["pane", "run"] for call in calls)
+    assert not any(call[:2] == ["workspace", "close"] for call in calls)
+
+
+def test_herdr_prefers_focused_pane_on_active_tab(wt_module, monkeypatch):
+    calls = []
+
+    def run(args, timeout=None):
+        calls.append(args)
+        if args[:2] == ["worktree", "open"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "worktree_opened",
+                        "already_open": False,
+                        "workspace": {"workspace_id": "w2", "active_tab_id": "w2:t1"},
+                    }
+                },
+            )
+        if args[:2] == ["pane", "list"]:
+            return completed(
+                args,
+                {
+                    "result": {
+                        "type": "pane_list",
+                        "panes": [
+                            {"pane_id": "w2:p1", "tab_id": "w2:t1"},
+                            {"pane_id": "w2:p2", "tab_id": "w2:t1", "focused": True},
+                        ],
+                    }
+                },
+            )
         return completed(args)
 
     monkeypatch.setattr(wt_module.HerdrTerminalHandler, "_run", staticmethod(run))
@@ -237,14 +431,13 @@ def test_herdr_focuses_existing_workspace_without_injecting_agent(
     )
 
     assert transition is wt_module.WorktreeTransition.TERMINAL
-    assert calls[-1] == ["workspace", "focus", "w2"]
-    assert not any(call[:2] == ["pane", "run"] for call in calls)
+    assert ["pane", "run", "w2:p2", "cl"] in calls
 
 
 def test_herdr_falls_back_when_workspace_focus_fails(wt_module, monkeypatch):
     calls = []
 
-    def run(args):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["worktree", "open"]:
             return completed(
@@ -267,7 +460,7 @@ def test_herdr_falls_back_when_workspace_focus_fails(wt_module, monkeypatch):
         "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
     )
 
-    assert transition is wt_module.WorktreeTransition.SHELL
+    assert transition is wt_module.WorktreeTransition.SHELL_CD_ONLY
     assert calls[-1] == ["workspace", "close", "w2"]
     assert not any(call[:2] == ["pane", "run"] for call in calls)
 
@@ -275,7 +468,7 @@ def test_herdr_falls_back_when_workspace_focus_fails(wt_module, monkeypatch):
 def test_herdr_falls_back_for_malformed_pane_entries(wt_module, monkeypatch):
     calls = []
 
-    def run(args):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["worktree", "open"]:
             return completed(
@@ -298,14 +491,49 @@ def test_herdr_falls_back_for_malformed_pane_entries(wt_module, monkeypatch):
         "/repo", "/repo/.worktrees/bs-feature", "Feature", "cl"
     )
 
-    assert transition is wt_module.WorktreeTransition.SHELL
+    assert transition is wt_module.WorktreeTransition.SHELL_CD_ONLY
     assert calls[-1] == ["workspace", "close", "w2"]
+
+
+def test_create_shell_cd_only_omits_agent_from_fd3(wt_module, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["git", "init", "-b", "main"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "commit", "--allow-empty", "-m", "initial"],
+    ):
+        subprocess.run(args, cwd=repo, check=True, capture_output=True)
+
+    class Handler:
+        def open_worktree(self, git_root, worktree_dir, label, agent_command):
+            return wt_module.WorktreeTransition.SHELL_CD_ONLY
+
+    original_run_command = wt_module.run_command
+
+    def run_command(command, *args, **kwargs):
+        if command in {"command -v gt", "command -v mise"}:
+            return None
+        return original_run_command(command, *args, **kwargs)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(wt_module, "current_terminal_handler", lambda: Handler())
+    monkeypatch.setattr(wt_module, "run_command", run_command)
+
+    result = CliRunner().invoke(wt_module.cli, ["create", "feature"])
+
+    assert result.exit_code == 0, result.output
+    assert "run 'cl' manually" in result.output
+    # Under CliRunner /dev/fd/3 is unavailable, so the fallback prints only the
+    # cd line — the agent command must never be emitted for the caller to run.
+    assert not any(line.strip() == "cl" for line in result.output.splitlines())
 
 
 def test_herdr_cleanup_closes_current_pane_workspace(wt_module, monkeypatch):
     calls = []
 
-    def run(args):
+    def run(args, timeout=None):
         calls.append(args)
         if args[:2] == ["pane", "current"]:
             return completed(
