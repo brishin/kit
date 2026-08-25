@@ -35,6 +35,7 @@ import sys
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from pathlib import Path
+from typing import NamedTuple
 
 import click
 import questionary
@@ -127,6 +128,10 @@ class WorktreeTransition(Enum):
 class TerminalHandler(ABC):
     """Own the terminal-specific parts of a worktree lifecycle."""
 
+    # Human-readable reason the last open_worktree failed, for the caller's
+    # warning message; None when unknown or not applicable.
+    open_error: str | None = None
+
     @classmethod
     @abstractmethod
     def is_active(cls) -> bool:
@@ -200,6 +205,12 @@ class CmuxTerminalHandler(TerminalHandler):
         )
 
 
+class _HerdrOutcome(NamedTuple):
+    result: dict | None  # parsed data["result"] on exit 0
+    error: dict | None  # parsed data["error"] on nonzero exit ({} if no JSON)
+    timed_out: bool  # _run gave up (timeout or the binary failed to run)
+
+
 class HerdrTerminalHandler(TerminalHandler):
     """Open worktrees in Herdr workspaces and launch the requested agent there."""
 
@@ -236,18 +247,29 @@ class HerdrTerminalHandler(TerminalHandler):
             return None
         return cls()
 
+    def _json_outcome(
+        self, args: list[str], timeout: float | None = None
+    ) -> _HerdrOutcome:
+        proc = self._run(args, timeout=timeout)
+        if proc is None:
+            return _HerdrOutcome(None, None, True)
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            data = None
+        if proc.returncode != 0:
+            # Herdr prints its error JSON on stdout.
+            error = data.get("error") if isinstance(data, dict) else None
+            return _HerdrOutcome(None, error if isinstance(error, dict) else {}, False)
+        result_data = data.get("result") if isinstance(data, dict) else None
+        return _HerdrOutcome(
+            result_data if isinstance(result_data, dict) else None, None, False
+        )
+
     def _json_result(
         self, args: list[str], timeout: float | None = None
     ) -> dict | None:
-        result = self._run(args, timeout=timeout)
-        if result is None or result.returncode != 0:
-            return None
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return None
-        result_data = data.get("result") if isinstance(data, dict) else None
-        return result_data if isinstance(result_data, dict) else None
+        return self._json_outcome(args, timeout=timeout).result
 
     def _close_workspace(self, workspace_id: str) -> None:
         self._run(["workspace", "close", workspace_id])
@@ -256,6 +278,23 @@ class HerdrTerminalHandler(TerminalHandler):
         if created_workspace:
             self._close_workspace(workspace_id)
         return WorktreeTransition.SHELL_CD_ONLY
+
+    def _open_command(
+        self, anchor: list[str], worktree_dir: str, label: str
+    ) -> _HerdrOutcome:
+        return self._json_outcome(
+            [
+                "worktree",
+                "open",
+                *anchor,
+                "--path",
+                worktree_dir,
+                "--label",
+                label,
+                "--no-focus",
+            ],
+            timeout=self.OPEN_TIMEOUT_SECONDS,
+        )
 
     def open_worktree(
         self,
@@ -274,20 +313,16 @@ class HerdrTerminalHandler(TerminalHandler):
             if caller_workspace
             else ["--cwd", git_root]
         )
-        result = self._json_result(
-            [
-                "worktree",
-                "open",
-                *anchor,
-                "--path",
-                worktree_dir,
-                "--label",
-                label,
-                "--no-focus",
-            ],
-            timeout=self.OPEN_TIMEOUT_SECONDS,
-        )
+        outcome = self._open_command(anchor, worktree_dir, label)
+        if caller_workspace and outcome.result is None and not outcome.timed_out:
+            # Herdr rejects worktree-checkout anchors (linked_worktree_source);
+            # the main-checkout anchor always passes source validation.
+            # Placement next to the caller is unachievable then, so fall back
+            # rather than fail. Skip after a timeout — the server is wedged.
+            outcome = self._open_command(["--cwd", git_root], worktree_dir, label)
+        result = outcome.result
         if not result or result.get("type") != "worktree_opened":
+            self.open_error = (outcome.error or {}).get("message")
             return WorktreeTransition.SHELL_CD_ONLY
 
         workspace = result.get("workspace")
@@ -666,8 +701,10 @@ def create(branch_name, prefix, base, remote, hook, no_cl, launch_pi):
                 agent_command if transition is WorktreeTransition.SHELL else None
             )
             if transition is WorktreeTransition.SHELL_CD_ONLY and agent_command:
+                detail = getattr(handler, "open_error", None) if handler else None
+                suffix = f" ({detail})" if detail else ""
                 print(
-                    f"⚠️  Herdr open failed; run '{agent_command}' manually in the new worktree",
+                    f"⚠️  Herdr open failed{suffix}; run '{agent_command}' manually in the new worktree",
                     file=out,
                 )
             # Output cd command to fd 3 for shell to eval.
